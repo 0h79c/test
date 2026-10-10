@@ -1,0 +1,9 @@
+{
+  "name": "EvolutionObby",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {"Shared": {"$path": "src/shared"}},
+    "ServerScriptService": {"Game": {"$path": "src/server"}},
+    "StarterPlayer": {"StarterPlayerScripts": {"GameUI": {"$path": "src/client"}}}
+  }
+}

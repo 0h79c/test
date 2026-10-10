@@ -1,0 +1,417 @@
+<?xml version='1.0' encoding='utf-8'?>
+<roblox version="4">
+  <Item class="Workspace" referent="RBX1">
+    <Properties>
+      <string name="Name">Workspace</string>
+    </Properties>
+  </Item>
+  <Item class="ReplicatedStorage" referent="RBX2">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="RBX3">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="RBX8">
+        <Properties>
+          <string name="Name">Config</string>
+          <ProtectedString name="Source">local Config = {}
+Config.CheckpointsPerEvolution = 10
+Config.CheckpointReward = 100
+Config.RerollCost = 500
+Config.Species = {}
+local rows = {
+ {"Snail", "Ốc Sên",12,40}, {"Caterpillar","Sâu Bướm",14,45},
+ {"Mouse","Chuột",16,50}, {"Frog","Ếch",16,65}, {"Turtle","Rùa",14,50},
+ {"Rabbit","Thỏ",18,60}, {"Cat","Mèo",20,60}, {"Hound","Chó Săn",24,60},
+ {"Monkey","Khỉ",22,75}, {"Cheetah","Báo Gấm",35,65},
+ {"Kangaroo","Chuột Túi",24,90}, {"Gorilla","Tinh Tinh",20,70},
+ {"Pegasus","Ngựa Cánh",35,95}, {"Phoenix","Phượng Hoàng",40,100},
+ {"WhiteDragon","Rồng Trắng",50,120},
+}
+for id, row in ipairs(rows) do
+ Config.Species[id] = {ModelName=row[1], Name=row[2], WalkSpeed=row[3], JumpPower=row[4]}
+end
+Config.Mutations = {
+ {Name="Normal", Label="Nguyên bản", Weight=50, Scale=1, Speed=1, Jump=1},
+ {Name="Giant", Label="Khổng lồ", Weight=20, Scale=1.5, Speed=1.1, Jump=1.05},
+ {Name="Tiny", Label="Tí hon", Weight=15, Scale=0.5, Speed=1.05, Jump=1.1},
+ {Name="Radioactive", Label="Phát quang", Weight=10, Scale=1, Speed=1.15, Jump=1.15},
+ {Name="Awakened", Label="Thức tỉnh", Weight=5, Scale=1, Speed=1.3, Jump=1.3},
+}
+function Config.Unlocked(checkpoint)
+ return math.clamp(1 + math.floor(checkpoint / Config.CheckpointsPerEvolution), 1, #Config.Species)
+end
+function Config.Roll(rng)
+ local roll = rng:NextInteger(1,100)
+ for _, mutation in ipairs(Config.Mutations) do
+  roll -= mutation.Weight
+  if roll &lt;= 0 then return mutation.Name end
+ end
+ return "Normal"
+end
+function Config.Mutation(name)
+ for _, mutation in ipairs(Config.Mutations) do
+  if mutation.Name == name then return mutation end
+ end
+ return Config.Mutations[1]
+end
+return Config
+</ProtectedString>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="RBX4">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Folder" referent="RBX5">
+      <Properties>
+        <string name="Name">Game</string>
+      </Properties>
+      <Item class="ModuleScript" referent="RBX9">
+        <Properties>
+          <string name="Name">Character</string>
+          <ProtectedString name="Source">local Config = require(game.ReplicatedStorage.Shared.Config)
+local Character = {}
+function Character.Apply(player, data)
+ local character = player.Character
+ if not character then return end
+ local humanoid = character:FindFirstChildOfClass("Humanoid")
+ local root = character:FindFirstChild("HumanoidRootPart")
+ if not humanoid or not root then return end
+ local species = Config.Species[data.Form]
+ local mutation = Config.Mutation(data.Mutations[tostring(data.Form)])
+ for _, name in ipairs({"AnimalVisual", "GlideForce", "GlideAttachment", "AuraAttachment"}) do
+  local old = character:FindFirstChild(name, true)
+  if old then old:Destroy() end
+ end
+ character:ScaleTo(mutation.Scale * (data.Form == 5 and 0.65 or 1))
+ humanoid.UseJumpPower = true
+ humanoid.WalkSpeed = species.WalkSpeed * mutation.Speed
+ humanoid.JumpPower = species.JumpPower * mutation.Jump
+ local visual = Instance.new("Model")
+ visual.Name = "AnimalVisual"
+ visual.Parent = character
+ local color = data.Form == 15 and Color3.new(1,1,1) or Color3.fromHSV(data.Form/15,0.65,0.9)
+ if mutation.Name == "Radioactive" then color = Color3.fromHSV((player.UserId % 100)/100,1,1) end
+ for _, part in ipairs(character:GetDescendants()) do
+  if part:IsA("BasePart") and part ~= root then part.Transparency = 1 end
+ end
+ local scale = character:GetScale()
+ local function body(name, size, offset, shape)
+  local p = Instance.new("Part")
+  p.Name = name
+  p.Shape = shape or Enum.PartType.Ball
+  p.Size = size * scale
+  p.CFrame = root.CFrame * CFrame.new(offset * scale)
+  p.Color = color
+  p.Material = mutation.Name == "Radioactive" and Enum.Material.Neon or Enum.Material.SmoothPlastic
+  p.CanCollide = false
+  p.CanTouch = false
+  p.Massless = true
+  p.Parent = visual
+  local weld = Instance.new("WeldConstraint")
+  weld.Part0 = root; weld.Part1 = p; weld.Parent = p
+  return p
+ end
+ body("Body",Vector3.new(2.2,1.6,3),Vector3.new(0,-0.5,0))
+ body("Head",Vector3.new(1.6,1.6,1.6),Vector3.new(0,0,-1.7))
+ for _, x in ipairs({-0.45,0.45}) do
+  local eye = body("Eye",Vector3.new(0.3,0.3,0.3),Vector3.new(x,0.35,-2.4))
+  eye.Color = Color3.new(0,0,0)
+ end
+ if data.Form == 1 or data.Form == 5 then
+  local shell = body("Shell",Vector3.new(2.4,2,2.5),Vector3.new(0,0.25,0.3))
+  shell.Color = Color3.fromRGB(115,80,45)
+ elseif data.Form == 2 then
+  for z=1,3 do body("Segment",Vector3.new(1.7,1.5,1.7),Vector3.new(0,-0.5,z)) end
+ elseif data.Form &gt;= 13 then
+  for _, x in ipairs({-2,2}) do body("Wing",Vector3.new(3,0.3,2),Vector3.new(x,0.5,0),Enum.PartType.Block) end
+ else
+  for _, x in ipairs({-0.6,0.6}) do body("Ear",Vector3.new(0.5,data.Form == 6 and 1.8 or 0.8,0.5),Vector3.new(x,1,-1.6)) end
+ end
+ if mutation.Name == "Awakened" or data.Form == 14 then
+  local attachment = Instance.new("Attachment")
+  attachment.Name="AuraAttachment"; attachment.Position=Vector3.new(0,-2,0); attachment.Parent=root
+  local emitter=Instance.new("ParticleEmitter")
+  emitter.Color=ColorSequence.new(data.Form == 14 and Color3.fromRGB(255,110,20) or color)
+  emitter.Rate=20; emitter.Lifetime=NumberRange.new(0.5,1); emitter.Speed=NumberRange.new(1,3)
+  emitter.Parent=attachment
+ end
+ if data.Form == 13 or mutation.Name == "Awakened" then
+  local attachment=Instance.new("Attachment"); attachment.Name="GlideAttachment"; attachment.Parent=root
+  local force=Instance.new("VectorForce"); force.Name="GlideForce"; force.Attachment0=attachment
+  force.RelativeTo=Enum.ActuatorRelativeTo.World; force.ApplyAtCenterOfMass=true
+  force.Force=Vector3.new(0,root.AssemblyMass*workspace.Gravity*0.18,0); force.Parent=root
+ end
+ character:SetAttribute("Form",data.Form)
+ character:SetAttribute("Mutation",mutation.Name)
+end
+return Character
+</ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="Script" referent="RBX10">
+        <Properties>
+          <string name="Name">Main</string>
+          <ProtectedString name="Source">local Players=game:GetService("Players")
+local DataStoreService=game:GetService("DataStoreService")
+local HttpService=game:GetService("HttpService")
+local Config=require(game.ReplicatedStorage.Shared.Config)
+local Character=require(script.Parent.Character)
+local World=require(script.Parent.World)
+local store=DataStoreService:GetDataStore("EvolutionObby_v1")
+local rng=Random.new()
+local profiles, stations, lastAction, saving = {}, {}, {}, {}
+local session=HttpService:GenerateGUID(false)
+local remote=Instance.new("RemoteEvent"); remote.Name="EvolutionEvent"; remote.Parent=game.ReplicatedStorage
+local function sync(p,message)
+ local d=profiles[p]; if not d then return end
+ p.leaderstats.Coins.Value=d.Coins; p.leaderstats.Checkpoint.Value=d.Checkpoint
+ remote:FireClient(p,"State",{Coins=d.Coins,Checkpoint=d.Checkpoint,Form=d.Form,
+  Unlocked=Config.Unlocked(d.Checkpoint),Mutations=d.Mutations,Message=message,ReadOnly=d.ReadOnly})
+end
+local function save(p,release)
+ local d=profiles[p]; if not d or d.ReadOnly then return end
+ while saving[p] do task.wait(0.1) end
+ saving[p]=true
+ local payload={Coins=d.Coins,Checkpoint=d.Checkpoint,Form=d.Form,Mutations=table.clone(d.Mutations)}
+ local ok,result=pcall(function()
+  return store:UpdateAsync("player_"..p.UserId,function(old)
+   if not old or old.Session ~= session then return nil end
+   if release then payload.Session=nil else payload.Session=session end
+   payload.Lease=release and 0 or os.time()+180
+   return payload
+  end)
+ end)
+ saving[p]=nil
+ if not ok then
+  warn("Save failed for user",p.UserId,result)
+  if p.Parent then sync(p,"Lưu dữ liệu đang lỗi. Máy chủ sẽ thử lại ở lần autosave tiếp theo.") end
+ elseif not result then
+  d.ReadOnly=true
+  if p.Parent then sync(p,"Mất khóa dữ liệu: tiến trình phiên này không được lưu.") end
+ end
+end
+local function checkpoint(p,stage)
+ local d=profiles[p]
+ if not d or stage ~= d.Checkpoint+1 then return end
+ local root=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+ if not root or (root.Position-World.Checkpoints[stage].Position).Magnitude &gt; 18 then return end
+ local previous=Config.Unlocked(d.Checkpoint)
+ d.Checkpoint=stage; d.Coins+=Config.CheckpointReward
+ local unlocked=Config.Unlocked(stage)
+ if unlocked&gt;previous then
+  d.Form=unlocked; d.Mutations[tostring(unlocked)]=Config.Roll(rng); Character.Apply(p,d)
+ end
+ sync(p,stage==140 and "Bạn đã mở khóa Rồng Trắng!" or nil)
+end
+World.Build(checkpoint,function(p,id,value)
+ local d=profiles[p]; if not d or d.Collected[id] or math.abs(id-d.Checkpoint)&gt;1 then return end
+ local root=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+ local coinPosition=Vector3.new((id-1)*24+8,13,2)
+ if not root or (root.Position-coinPosition).Magnitude&gt;10 then return end
+ d.Collected[id]=true; d.Coins+=value; sync(p)
+end,function(p,station)
+ if profiles[p] then stations[p]=station; remote:FireClient(p,"Station") end
+end)
+remote.OnServerEvent:Connect(function(p,action,value)
+ local d=profiles[p]; if not d then return end
+ if lastAction[p] and os.clock()-lastAction[p]&lt;0.5 then return end
+ lastAction[p]=os.clock()
+ if action=="Sync" then sync(p); return end
+ local h=p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+ if not h or h.Health&lt;=0 then return end
+ if action=="Morph" then
+  if typeof(value)~="number" or value~=value or value%1~=0 or value&lt;1 or value&gt;Config.Unlocked(d.Checkpoint) then return end
+  d.Form=value; Character.Apply(p,d); sync(p)
+ elseif action=="Reroll" then
+  local root=p.Character:FindFirstChild("HumanoidRootPart")
+  local station=stations[p]
+  if not root or not station or (root.Position-station.Position).Magnitude&gt;14 then sync(p,"Hãy đến trạm đột biến."); return end
+  if d.Coins&lt;Config.RerollCost then sync(p,"Không đủ 500 Coins."); return end
+  d.Coins-=Config.RerollCost; d.Mutations[tostring(d.Form)]=Config.Roll(rng)
+  Character.Apply(p,d); sync(p,"Đột biến: "..Config.Mutation(d.Mutations[tostring(d.Form)]).Label)
+ end
+end)
+Players.PlayerAdded:Connect(function(p)
+ local stats=Instance.new("Folder"); stats.Name="leaderstats"; stats.Parent=p
+ for _,name in ipairs({"Coins","Checkpoint"}) do local v=Instance.new("IntValue"); v.Name=name; v.Parent=stats end
+ local d
+ local ok=pcall(function()
+  d=store:UpdateAsync("player_"..p.UserId,function(old)
+   if old and old.Session and (old.Lease or 0)&gt;os.time() and old.Session~=session then return nil end
+   old=old or {Coins=0,Checkpoint=0,Form=1,Mutations={['1']="Normal"}}
+   old.Session=session; old.Lease=os.time()+180; return old
+  end)
+ end)
+ if ok and not d then p:Kick("Tiến trình đang mở ở máy chủ khác. Vui lòng thử lại sau."); return end
+ if not ok then
+  d={Coins=0,Checkpoint=0,Form=1,Mutations={['1']="Normal"},ReadOnly=true}
+  warn("DataStore unavailable; temporary progress only",p.UserId)
+ end
+ d.Checkpoint=math.clamp(math.floor(tonumber(d.Checkpoint) or 0),0,140)
+ d.Coins=math.max(0,math.floor(tonumber(d.Coins) or 0))
+ d.Form=math.clamp(math.floor(tonumber(d.Form) or 1),1,Config.Unlocked(d.Checkpoint))
+ d.Mutations=typeof(d.Mutations)=="table" and d.Mutations or {}
+ for i=1,Config.Unlocked(d.Checkpoint) do d.Mutations[tostring(i)]=Config.Mutation(d.Mutations[tostring(i)]).Name end
+ d.Collected={}; profiles[p]=d
+ local function spawn(character)
+  character:WaitForChild("HumanoidRootPart"); character:WaitForChild("Humanoid")
+  if profiles[p]~=d then return end
+  Character.Apply(p,d); character:PivotTo(World.Checkpoints[d.Checkpoint]); sync(p)
+ end
+ p.CharacterAdded:Connect(spawn)
+ if p.Character then task.spawn(spawn,p.Character) end
+ sync(p,d.ReadOnly and "Phiên tạm: tiến trình không được lưu (DataStore chưa khả dụng)." or nil)
+end)
+Players.PlayerRemoving:Connect(function(p)
+ save(p,true); profiles[p]=nil; stations[p]=nil; lastAction[p]=nil
+end)
+task.spawn(function()
+ while true do task.wait(60); for p in pairs(profiles) do task.spawn(save,p,false) end end
+end)
+game:BindToClose(function()
+ local pending=0
+ for p in pairs(profiles) do pending+=1; task.spawn(function() save(p,true); pending-=1 end) end
+ while pending&gt;0 do task.wait(0.1) end
+end)
+</ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX11">
+        <Properties>
+          <string name="Name">World</string>
+          <ProtectedString name="Source">local World = {}
+World.Checkpoints = {}
+function World.Build(onCheckpoint, onCoin, onStation)
+ local folder=Instance.new("Folder"); folder.Name="EvolutionObby"; folder.Parent=workspace
+ local function part(name,size,position,color)
+  local p=Instance.new("Part"); p.Name=name; p.Size=size; p.Position=position
+  p.Anchored=true; p.Color=color; p.Parent=folder; return p
+ end
+ local function player(hit)
+  local model=hit:FindFirstAncestorOfClass("Model")
+  return model and game.Players:GetPlayerFromCharacter(model)
+ end
+ local spawn=Instance.new("SpawnLocation"); spawn.Size=Vector3.new(24,1,24)
+ spawn.Position=Vector3.new(0,10,0); spawn.Anchored=true; spawn.Neutral=true; spawn.Parent=folder
+ World.Checkpoints[0]=spawn.CFrame + Vector3.new(0,5,0)
+ for stage=0,140 do
+  local x=stage*24
+  if stage &gt; 0 then
+   local platform=part("Checkpoint"..stage,Vector3.new(14,1,14),Vector3.new(x,10,0),Color3.fromRGB(70,190,130))
+   World.Checkpoints[stage]=platform.CFrame + Vector3.new(0,5,0)
+   platform.Touched:Connect(function(hit) local p=player(hit); if p then onCheckpoint(p,stage) end end)
+  end
+  if stage &lt; 140 then
+   for step=1,2 do
+    part("Jump",Vector3.new(7,1,8),Vector3.new(x+step*8,10,step==1 and 2 or -2),Color3.fromRGB(90,130,210))
+   end
+   local coin=part("Coin",Vector3.new(1,1,1),Vector3.new(x+8,13,2),Color3.fromRGB(255,215,40))
+   coin.Shape=Enum.PartType.Ball; coin.Material=Enum.Material.Neon; coin.CanCollide=false
+   coin.Touched:Connect(function(hit) local p=player(hit); if p then onCoin(p,stage+1,25) end end)
+   if stage &gt;= 30 and stage % 3 == 0 then
+    local lava=part("Lava",Vector3.new(2,0.25,8),Vector3.new(x+16,10.65,-2),Color3.fromRGB(255,70,15))
+    lava.Material=Enum.Material.Neon
+    lava.Touched:Connect(function(hit)
+     local p=player(hit); local h=p and p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+     if h and p.Character:GetAttribute("Form") ~= 14 then h.Health=0 end
+    end)
+   end
+  end
+  if stage % 10 == 0 then
+   local station=part("MutationPad",Vector3.new(5,1,5),Vector3.new(x,11,5),Color3.fromRGB(165,70,230))
+   local prompt=Instance.new("ProximityPrompt"); prompt.ActionText="Đột biến · 500 Coins"
+   prompt.ObjectText="Trạm đột biến"; prompt.RequiresLineOfSight=false; prompt.MaxActivationDistance=12; prompt.Parent=station
+   prompt.Triggered:Connect(function(p) onStation(p,station) end)
+  end
+ end
+ local void=part("Void",Vector3.new(3500,1,200),Vector3.new(1680,-20,0),Color3.fromRGB(255,40,30))
+ void.Transparency=1
+ void.Touched:Connect(function(hit)
+  local p=player(hit); local h=p and p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+  if h then h.Health=0 end
+ end)
+ return folder
+end
+return World
+</ProtectedString>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="RBX6">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="RBX7">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="RBX12">
+        <Properties>
+          <string name="Name">Main</string>
+          <ProtectedString name="Source">local Players=game:GetService("Players")
+local Config=require(game.ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local remote=game.ReplicatedStorage:WaitForChild("EvolutionEvent")
+local gui=Instance.new("ScreenGui"); gui.Name="EvolutionUI"; gui.ResetOnSpawn=false
+gui.Parent=Players.LocalPlayer:WaitForChild("PlayerGui")
+local function label(parent,text,size,position)
+ local item=Instance.new("TextLabel"); item.Size=size; item.Position=position
+ item.BackgroundColor3=Color3.fromRGB(25,30,45); item.TextColor3=Color3.new(1,1,1)
+ item.Text=text; item.TextWrapped=true; item.TextSize=16; item.Font=Enum.Font.Gotham; item.Parent=parent
+ return item
+end
+local function button(parent,text,size,position,callback)
+ local item=Instance.new("TextButton"); item.Size=size; item.Position=position
+ item.BackgroundColor3=Color3.fromRGB(65,85,150); item.TextColor3=Color3.new(1,1,1)
+ item.Text=text; item.TextSize=16; item.TextWrapped=true; item.Parent=parent
+ item.Activated:Connect(callback); return item
+end
+local hud=label(gui,"Đang tải…",UDim2.new(1,-24,0,65),UDim2.fromOffset(12,12))
+local message=label(gui,"",UDim2.new(1,-24,0,40),UDim2.new(0,12,1,-50))
+local dex=Instance.new("Frame"); dex.Size=UDim2.new(0.9,0,0.65,0); dex.Position=UDim2.fromScale(0.05,0.2)
+dex.BackgroundColor3=Color3.fromRGB(20,25,40); dex.Visible=false; dex.Parent=gui
+button(gui,"Sách Tiến Hóa",UDim2.fromOffset(170,42),UDim2.fromOffset(12,85),function() dex.Visible=not dex.Visible end)
+button(dex,"Đóng",UDim2.new(1,0,0,35),UDim2.new(),function() dex.Visible=false end)
+local scroll=Instance.new("ScrollingFrame"); scroll.Size=UDim2.new(1,0,1,-40)
+scroll.Position=UDim2.fromOffset(0,40); scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y
+scroll.CanvasSize=UDim2.new(); scroll.ScrollBarThickness=6; scroll.Parent=dex
+local layout=Instance.new("UIListLayout"); layout.Padding=UDim.new(0,5); layout.Parent=scroll
+local state; local buttons={}
+for i=1,#Config.Species do
+ buttons[i]=button(scroll,"???",UDim2.new(1,-10,0,45),UDim2.new(),function()
+  if state and i&lt;=state.Unlocked then remote:FireServer("Morph",i) end
+ end)
+end
+local station=Instance.new("Frame"); station.Size=UDim2.new(0.8,0,0,180)
+station.Position=UDim2.fromScale(0.1,0.35); station.Visible=false; station.Parent=gui
+local prompt=label(station,"",UDim2.new(1,0,0,90),UDim2.new())
+button(station,"Đổ lại gen · 500 Coins",UDim2.new(1,0,0,45),UDim2.fromOffset(0,90),function() remote:FireServer("Reroll") end)
+button(station,"Đóng",UDim2.new(1,0,0,40),UDim2.fromOffset(0,140),function() station.Visible=false end)
+remote.OnClientEvent:Connect(function(action,data)
+ if action=="Station" then station.Visible=true; return end
+ if action~="State" then return end
+ state=data
+ local species=Config.Species[data.Form]
+ hud.Text=string.format("%s · %s | Coins: %d | Checkpoint: %d/140%s",species.Name,
+  Config.Mutation(data.Mutations[tostring(data.Form)]).Label,data.Coins,data.Checkpoint,data.ReadOnly and " · Không lưu" or "")
+ prompt.Text="Đổ lại gen Đột Biến cho "..species.Name.."? Giá: 500 Coins"
+ for i,b in ipairs(buttons) do
+  b.Text=i&lt;=data.Unlocked and string.format("%d. %s · %s%s",i,Config.Species[i].Name,
+   Config.Mutation(data.Mutations[tostring(i)]).Label,i==data.Form and " ✓" or "") or string.format("??? · Mở tại checkpoint %d",(i-1)*10)
+  b.BackgroundColor3=i&lt;=data.Unlocked and Color3.fromRGB(65,85,150) or Color3.fromRGB(40,40,40)
+ end
+ if data.Message then message.Text=data.Message end
+end)
+remote:FireServer("Sync")
+</ProtectedString>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
