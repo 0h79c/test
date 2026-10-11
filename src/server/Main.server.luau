@@ -12,6 +12,7 @@ local World = require(script.Parent:WaitForChild("World"))
 local Ecology = require(script.Parent:WaitForChild("Ecology"))
 local Events = require(script.Parent:WaitForChild("Events"))
 local Commerce = require(script.Parent:WaitForChild("Commerce"))
+local Buffs = require(script.Parent:WaitForChild("Buffs"))
 
 Players.CharacterAutoLoads = false
 workspace:SetAttribute("EvolutionStatus", "Starting")
@@ -30,6 +31,12 @@ local function alive(player)
  local humanoid = character and character:FindFirstChildOfClass("Humanoid")
  if not root or not humanoid or humanoid.Health <= 0 then return nil end
  return root, humanoid
+end
+local function applyCharacter(player,data)
+ data=data or profiles[player]
+ if not data then return false end
+ data.BuffModifiers=Buffs.GetModifiers(player)
+ return Character.Apply(player,data)
 end
 local function volume(player)
  local collider = player.Character and player.Character:FindFirstChild("AnimalCollider")
@@ -83,6 +90,7 @@ local function sync(player, message)
   Coins=data.Coins,Fullness=data.Fullness,Form=data.Form,Unlocked=data.Unlocked,
   Mutations=table.clone(data.Mutations),FreeRerolls=data.FreeRerolls,LastMutationBoost=data.LastMutationBoost,
   PassOwned=Commerce.HasPass(player),ReadOnly=data.ReadOnly,Loading=data.Loading,
+  Buffs=Buffs.GetState(player),
   Biome=biome,ReviveAvailable=Commerce.HasPass(player) and offer>0 and cooldown==0,
   ReviveCooldown=cooldown,ReviveExpiresIn=offer,Commerce=availability,CommerceConfig=Config.Commerce,Message=message,
  })
@@ -248,14 +256,24 @@ local function awardFood(player,spec,source)
  local gain, coins=Rules.AddFood(data,spec,Commerce.HasPass(player))
  local mutated=source and source.MutationFood
  local message=string.format("%s: +%g%% no · +%d Coins",spec.Name or "Thức ăn",gain,coins)
+ local buff=spec.Buff and Buffs.Apply(player,spec.Buff)
+ if buff then
+  local description=spec.Buff=="Speed" and "+50% tốc chạy"
+   or spec.Buff=="Hunt" and ("Săn vượt "..tostring(buff.Tiers or 2).." bậc") or "Kích thước ×5"
+  message=(spec.Name or "Thuốc")..": "..description.." · "..Config.Buffs.Duration.." giây"
+ end
  if mutated then
   local name=Rules.StartMutation(data,rng,source.Boost==3 and 3 or 1,Commerce.HasPass(player))
-  Character.Apply(player,data)
+  applyCharacter(player,data)
   message="Thức ăn đột biến: "..Config.Mutation(name).Label..(data.FreeRerolls>0 and " · 2 reroll miễn phí" or "")
   remote:FireClient(player,"Mutation",name)
  end
  local root=alive(player)
- remote:FireClient(player,"Food",{Gain=gain,Coins=coins,Position=root and root.Position,Name=spec.Name,MutationFood=mutated})
+ remote:FireClient(player,"Food",{Gain=gain,Coins=coins,Position=root and root.Position,Name=spec.Name,MutationFood=mutated,
+  Buff=buff and spec.Buff,EffectName=buff and spec.Name})
+ if buff then
+  remote:FireClient(player,"Buff",{Kind=spec.Buff,Name=spec.Name,Duration=Config.Buffs.Duration,Tiers=buff.Tiers})
+ end
  if Rules.CanEvolve(data) then message..=" · Đủ no! Nhấn Tiến hóa." end
  sync(player,message)
 end
@@ -275,6 +293,12 @@ local function buyTeleport(player,sourceId,destinationId)
  return true
 end
 Character.Initialize()
+Buffs.Start({OnChanged=function(player)
+ local data=profiles[player]
+ if not data then return end
+ if alive(player) then applyCharacter(player,data) end
+ sync(player)
+end})
 World.Build({
  OnBridge=function(player,part,cost)
   local data=profiles[player]; local root=alive(player)
@@ -318,6 +342,8 @@ Ecology.Start(World,{
  OnEat=awardFood,CanEat=canEat,
  GetPlayerForm=function(player) local d=profiles[player]; return d and d.Form or 0 end,
  GetPlayerSize=volume,
+ HasPass=Commerce.HasPass,
+ GetHuntBonus=function(player) return Buffs.GetModifiers(player).HuntBonus end,
 })
 
 local function attack(player)
@@ -338,8 +364,10 @@ local function attack(player)
     local distance=(otherRoot.Position-root.Position).Magnitude
     local ownCollider=player.Character:FindFirstChild("AnimalCollider")
     local otherCollider=other.Character:FindFirstChild("AnimalCollider")
-    local reach=ownCollider and otherCollider and math.min(Config.AttackRange,(ownCollider.Size.Magnitude+otherCollider.Size.Magnitude)/2+0.6) or 4
-    if distance<=Config.AttackRange and ((contact and now-contact<2) or distance<=reach) then
+    -- Giant potions enlarge contact distance as well as the visible animal.
+    local reach=ownCollider and otherCollider and (ownCollider.Size.Magnitude+otherCollider.Size.Magnitude)/2+0.6 or 4
+    local range=math.max(Config.AttackRange,reach)
+    if distance<=range and ((contact and now-contact<2) or distance<=reach) then
      local ray=RaycastParams.new()
      ray.FilterType=Enum.RaycastFilterType.Exclude
      ray.FilterDescendantsInstances={player.Character,other.Character}
@@ -395,19 +423,19 @@ remote.OnServerEvent:Connect(function(player,action,value)
  if not alive(player) then return end
  if action=="Evolve" then
   if Rules.Evolve(data) then
-   Character.Apply(player,data)
+   applyCharacter(player,data)
    remote:FireClient(player,"Evolution",data.Form)
    sync(player,"Tiến hóa thành "..Config.Species[data.Form].Name.."!")
   else sync(player,data.Unlocked==#Config.Species and "Bạn đã mở loài cuối cùng." or "Cần ăn đủ 100% độ no để tiến hóa.") end
  elseif action=="Morph" then
   if typeof(value)~="number" or value~=value or value%1~=0 or value<1 or value>data.Unlocked then return end
-  data.Form=value;Character.Apply(player,data);sync(player,"Đã đổi sang "..Config.Species[value].Name)
+  data.Form=value;applyCharacter(player,data);sync(player,"Đã đổi sang "..Config.Species[value].Name)
  elseif action=="Eat" then Ecology.TryEat(player)
  elseif action=="Attack" then attack(player)
  elseif action=="Reroll" then
   if not Commerce.HasPass(player) then sync(player,"Reroll miễn phí thuộc gói hỗ trợ."); return end
   local name=Rules.Reroll(data,rng)
-  if name then Character.Apply(player,data);remote:FireClient(player,"Mutation",name);sync(player,"Đột biến: "..Config.Mutation(name).Label)
+  if name then applyCharacter(player,data);remote:FireClient(player,"Mutation",name);sync(player,"Đột biến: "..Config.Mutation(name).Label)
   else sync(player,"Ăn thức ăn đột biến để nhận 2 reroll miễn phí.") end
  elseif action=="Teleport" and typeof(value)=="string" then World.UseTeleport(player,value)
  elseif action=="ReviveNear" then reviveNear(player)
@@ -458,7 +486,7 @@ local function loadProfile(player)
   local ground=World.GroundPosition(saved)
   data.NextSpawn=ground and CFrame.new(ground+Vector3.new(0,6,0)) or World.StartSpawn
  else data.NextSpawn=World.StartSpawn end
- if teleportCharacter(player,data.NextSpawn) then Character.Apply(player,data);grantProtection(player,Config.SpawnProtectionSeconds) end
+ if teleportCharacter(player,data.NextSpawn) then applyCharacter(player,data);grantProtection(player,Config.SpawnProtectionSeconds) end
  sync(player,"Đã tải tiến trình. Chào mừng đến thế giới mở!")
  task.defer(flushCredits,player)
 end
@@ -496,7 +524,7 @@ local function addPlayer(player)
   local humanoid=character:WaitForChild("Humanoid",15)
   if not root or not humanoid or profiles[player]~=data or player.Character~=character then return end
   teleportCharacter(player,data.NextSpawn or World.StartSpawn)
-  Character.Apply(player,data)
+  applyCharacter(player,data)
   grantProtection(player,Config.SpawnProtectionSeconds)
   sync(player)
   local contactConnections={}
@@ -529,7 +557,7 @@ local function addPlayer(player)
  end
  player.CharacterAdded:Connect(function(character) task.spawn(prepare,character) end)
  player.CharacterAppearanceLoaded:Connect(function(character)
-  if player.Character==character and profiles[player]==data then Character.Apply(player,data) end
+  if player.Character==character and profiles[player]==data then applyCharacter(player,data) end
  end)
  if player.Character then task.spawn(prepare,player.Character) else task.spawn(spawn) end
  sync(player)

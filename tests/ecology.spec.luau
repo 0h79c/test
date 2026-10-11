@@ -1,6 +1,6 @@
 -- Assertions cover contested claims, reach, dead/loading players, prey size,
 -- NPC claims and delayed respawn cancellation. Rendering is intentionally mocked.
-return function(source)
+return function(source, foodSource)
  local function signal()
   local handlers = {}
   local event = {}
@@ -90,8 +90,14 @@ return function(source)
  local heartbeat=signal()
  local storage={Shared={Config="Config",FoodModels="FoodModels",AnimalModels="AnimalModels"}}
  local config={Foods={{Id="berry",Name="Mọng",Hunger=.5,Coins=4,Weight=1}},
-  Species={},FoodCount=2,NPCCount=1,MutationFoodSpawnChance=.012}
- for i=1,15 do config.Species[i]={Name="Species"..i} end
+  Species={},FoodCount=2,NPCCount=1,MutationFoodSpawnChance=.012,AISpeedMultiplier=.5,MetersPerStud=.28,
+  FoodRespawn={AdditionalPlayerRate=.25,PerAIRate=.1,PassRadiusMeters=50,PassMultiplier=2},
+  BuffSpawnChance=.03,BuffFoodLifetime=300,BuffFoods={
+   {Id="speed_tonic",Buff="Speed",Duration=60,Hunger=0,Coins=0},
+   {Id="hunting_tonic",Buff="Hunt",Duration=60,Hunger=0,Coins=0},
+   {Id="giant_tonic",Buff="Giant",Duration=60,Hunger=0,Coins=0},
+  }}
+ for i=1,15 do config.Species[i]={Name="Species"..i,WalkSpeed=10+i*2} end
  local foods={}
  function foods.Create(spec,parent,_)
   local model=make("Model"); model.Name=spec.Id
@@ -131,9 +137,16 @@ return function(source)
   Instance={new=make},
   Vector3={new=vector},
   CFrame={new=frame,identity=frame(),Angles=function() return frame() end,lookAt=function(v,_) return frame(v) end},
-  Color3={fromRGB=function(...) return {...} end},
+  Color3={fromRGB=function(...) return {...} end,new=function(...) return {...} end},
+  Vector2={new=function(...) return {...} end},
+  ColorSequence={new=function(...) return {...} end},
+  NumberRange={new=function(...) return {...} end},
+  NumberSequence={new=function(...) return {...} end},
+  NumberSequenceKeypoint={new=function(...) return {...} end},
   UDim2={fromScale=function(...) return {...} end,fromOffset=function(...) return {...} end},
-  Enum={KeyCode={E="E",ButtonX="X"},Font={GothamMedium="font"},RaycastFilterType={Exclude="exclude"},EasingStyle={Linear="linear"}},
+  Enum={KeyCode={E="E",ButtonX="X"},Font={GothamMedium="font"},RaycastFilterType={Exclude="exclude"},EasingStyle={Linear="linear"},
+   PartType={Block="block",Ball="ball",Cylinder="cylinder"},
+   Material={SmoothPlastic="plastic",Glass="glass",Metal="metal",Wood="wood",Neon="neon"}},
   TweenInfo={new=function(...) return {...} end},
   RaycastParams={new=function() return {} end},Random={new=function(_) return random end},
   task={delay=function(seconds,callback) table.insert(delayed,{Seconds=seconds,Callback=callback}) end},
@@ -160,6 +173,8 @@ return function(source)
   end,
   GetPlayerForm=function(player) return player.Form end,
   GetPlayerSize=function(player) return player.Size end,
+  GetHuntBonus=function(player) return player.HuntBonus or 0 end,
+  HasPass=function(player) return player.Pass == true end,
   CanEat=function(player) return not player.Loading end,
  }
  local function player(name,form,size)
@@ -191,7 +206,9 @@ return function(source)
  assert(not ecology.TryEat(b,food),"contested food grants rewards exactly once")
  assert(awarded==1 and rewards[1].Spec.Hunger==.5 and rewards[1].Spec.Coins==4,"server provides canonical rewards")
  assert(count(ecology.ActiveFoods)==1 and not food.Parent,"consumed food is removed")
- assert(delayed[1].Seconds>=35 and delayed[1].Seconds<=90,"normal food respawn delay")
+ local pending=next(ecology.PendingFoods)
+ assert(pending and pending.Remaining>=35 and pending.Remaining<=90 and pending.Position,
+  "normal food reserves its next safe location before starting a population-scaled timer")
  local npc,npcEntry=next(ecology.ActiveNPCs)
  a.Character.HumanoidRootPart.CFrame=frame(npcEntry.Root.Position)
  a.Form=npcEntry.Form; a.Size=npcEntry.Size
@@ -208,6 +225,11 @@ return function(source)
  assert(not ecology.CanEatNPC(3,2,50,50) and not ecology.CanEatNPC(3,2,10,50),"equal and larger prey cannot be hunted")
  assert(not ecology.CanEatNPC(3,2,100,nil) and not ecology.CanEatNPC(3,2,math.huge,50)
   and not ecology.CanEatNPC(3,2,0/0,50) and not ecology.CanEatNPC(3,2,0,50),"invalid or partial supplied sizes never permit hunting")
+ assert(ecology.CanEatNPC(1,3,1,100,2) and ecology.CanEatNPC(1,5,1,100,4),
+  "temporary hunting strength permits exactly the extra server-supplied tiers regardless of volume")
+ assert(not ecology.CanEatNPC(1,4,1,100,2) and not ecology.CanEatNPC(1,6,1,100,4)
+  and not ecology.CanEatNPC(1,3,1,100,0) and not ecology.CanEatNPC(1,3,1,100,5)
+  and not ecology.CanEatNPC(1,3,1,100,2.5),"missing, expired or invalid hunting bonuses grant no extra tiers")
  assert(ecology.InEatingRange(vector(0,15,0),vector(7,0,0)),"tall forms can eat at their feet")
  assert(not ecology.InEatingRange(vector(0,19,0),vector(0,0,0)),"food too far above or below is unreachable")
  local remaining,remainingEntry=next(ecology.ActiveFoods)
@@ -216,17 +238,34 @@ return function(source)
  remaining:Destroy()
  local rare=ecology.RollFood({NextNumber=function() return .001 end},"meadow")
  assert(rare.Mutation and rare.Id=="mutation","rare roll produces mutation food")
+ for i=1,3 do
+  local tonic=ecology.RollFood({NextNumber=function() return .025 end,NextInteger=function() return i end},"meadow")
+  assert(tonic==config.BuffFoods[i] and tonic.Duration==60 and not tonic.Mutation,
+   "three tonic variants occupy the separate 3 percent bucket without granting mutations")
+ end
+ assert(ecology.RollFood({NextNumber=function(_,minimum) return minimum and .1 or .043 end},"meadow").Id=="berry",
+  "rolls above rare fruit plus tonic thresholds remain ordinary food")
  local boosted=ecology.SpawnMutationFood(vector(700,0,0),true)
  local boostedEntry=ecology.ActiveFoods[boosted]
  a.Character.HumanoidRootPart.CFrame=frame(boostedEntry.Position)
  assert(ecology.TryEat(a,boosted) and rewards[3].Source.Boost==3 and rewards[3].Source.MutationFood,"boosted rare food carries triple weight to the mutation service")
  ecology.Stop()
  for _, job in ipairs(delayed) do job.Callback() end
- assert(count(ecology.ActiveFoods)==0 and count(ecology.ActiveNPCs)==0,"stopped ecology cannot resurrect delayed food or prey")
+ assert(count(ecology.ActiveFoods)==0 and count(ecology.ActiveNPCs)==0 and count(ecology.PendingFoods)==0,
+  "stopped ecology cannot resurrect delayed food or prey")
  ecology.Start(world,handlers)
  a.Character.HumanoidRootPart.CFrame=frame(1200,3,0)
  b.Character.HumanoidRootPart.CFrame=frame(1300,3,0)
  local competitor,competitorEntry=next(ecology.ActiveNPCs)
+ competitorEntry.SearchAt=math.huge
+ competitorEntry.WanderAt=math.huge
+ competitorEntry.Goal=competitorEntry.Root.Position+vector(100,0,0)
+ local speedStart=competitorEntry.Root.Position
+ heartbeat:Fire(.25)
+ local expectedSpeed=config.Species[competitorEntry.Form].WalkSpeed*.5
+ assert(math.abs((competitorEntry.Root.Position-speedStart).Magnitude-expectedSpeed*.25)<.0001
+  and competitor:GetAttribute("MoveSpeed")==expectedSpeed and competitor:GetAttribute("NPCWalkSpeed")==expectedSpeed,
+  "AI actual movement and animation speed are exactly half of its default animal speed")
  local contested,contestedEntry=next(ecology.ActiveFoods)
  competitorEntry.Root.CFrame=frame(contestedEntry.GroundPosition+vector(20,0,0))
  local before=competitorEntry.Root.Position
@@ -247,21 +286,127 @@ return function(source)
  heartbeat:Fire(.3)
  assert(competitorEntry.Form==preyForm+1,"wildlife evolves when its own hunger reaches 100 percent")
  ecology.Stop()
+ ecology.Start(world,handlers)
+ local tonicFood,tonicEntry=next(ecology.ActiveFoods)
+ tonicEntry.Spec=config.BuffFoods[1]
+ local tonicNPC,tonicNPCEntry=next(ecology.ActiveNPCs)
+ tonicNPCEntry.Root.CFrame=frame(tonicEntry.GroundPosition+vector(1,0,0))
+ tonicNPCEntry.SearchAt=0
+ heartbeat:Fire(.3)
+ assert(ecology.ActiveFoods[tonicFood] and tonicNPCEntry.Target~=tonicFood,
+  "wildlife ignores a nearby player tonic when choosing food")
+ tonicNPCEntry.Target=tonicFood; tonicNPCEntry.SearchAt=math.huge
+ tonicNPCEntry.Root.CFrame=frame(tonicEntry.GroundPosition+vector(1,0,0))
+ local tonicHunger=tonicNPCEntry.Hunger
+ heartbeat:Fire(.3)
+ assert(ecology.ActiveFoods[tonicFood] and not tonicNPCEntry.Target and tonicNPCEntry.Hunger==tonicHunger,
+  "stale wildlife targets cannot consume player tonics or receive their effects")
+ ecology.Stop()
+ -- Existing timers must react immediately to server joins, deaths, pass owners
+ -- entering/leaving the actual reserved spawn radius, and overlapping auras.
+ ecology.Start(world,handlers)
+ local rateFood,rateEntry=next(ecology.ActiveFoods)
+ a.Character.HumanoidRootPart.CFrame=frame(rateEntry.Position)
+ assert(ecology.TryEat(a,rateFood),"dynamic spawn fixture consumes a slot")
+ local ratePending=next(ecology.PendingFoods)
+ local rateNPC,rateNPCEntry=next(ecology.ActiveNPCs)
+ rateNPCEntry.SearchAt=math.huge; rateNPCEntry.WanderAt=math.huge; rateNPCEntry.Goal=rateNPCEntry.Root.Position
+ local function advance(expected)
+  local beforeRemaining=ratePending.Remaining
+  heartbeat:Fire(1)
+  assert(math.abs(beforeRemaining-ratePending.Remaining-expected)<.0001,"pending food uses current population and local pass radius")
+ end
+ advance(1.35) -- Two humans and one live NPC.
+ local c=player("C",1,10)
+ advance(1.6)
+ a.Pass=true; a.Character.HumanoidRootPart.CFrame=frame(ratePending.Position+vector(50/.28+.01,0,0))
+ advance(1.6)
+ a.Character.HumanoidRootPart.CFrame=frame(ratePending.Position+vector(50/.28-.01,0,0))
+ advance(3.2)
+ b.Pass=true; b.Character.HumanoidRootPart.CFrame=frame(ratePending.Position)
+ advance(3.2)
+ a.Character.Humanoid.Health=0; b.Character.Humanoid.Health=0
+ advance(1.6)
+ rateNPC:Destroy()
+ advance(1.5)
+ table.remove(players.List,table.find(players.List,c)); c.Character:Destroy()
+ advance(1.25)
+ a.Pass=false; b.Pass=false; a.Character.Humanoid.Health=100; b.Character.Humanoid.Health=100
+ assert(ecology.GlobalRespawnRate(1,0)==1 and ecology.GlobalRespawnRate(5,10)==3,
+  "spawn speed starts at 100 percent and adds 25 percent per extra player plus 10 percent per living AI")
+ ecology.Stop()
  config.NPCCount=0
  ecology.Start(world,handlers)
  local retryFood,retryEntry=next(ecology.ActiveFoods)
  a.Character.HumanoidRootPart.CFrame=frame(retryEntry.Position)
- local initialRespawnIndex=#delayed+1
- assert(ecology.TryEat(a,retryFood),"retry fixture consumes one food slot")
  world.NoSpace=true; world.BlockedGround=true; world.BlockedAttempts=0
- delayed[initialRespawnIndex].Callback()
+ assert(ecology.TryEat(a,retryFood),"retry fixture consumes one food slot")
  assert(world.BlockedAttempts==45,"each blocked respawn search has a bounded candidate budget")
  assert(count(ecology.ActiveFoods)==1,"blocked respawn never forces food onto unsafe fallback terrain")
- local retryJob=delayed[#delayed]
- assert(retryJob.Seconds==15 and retryJob~=delayed[initialRespawnIndex],"a temporarily blocked food slot schedules another attempt")
+ heartbeat:Fire(14)
+ assert(world.BlockedAttempts==45,"blocked reservations do not retry every frame")
+ heartbeat:Fire(1)
+ assert(world.BlockedAttempts==90,"a temporarily blocked food slot retries after fifteen seconds")
  world.NoSpace=false; world.BlockedGround=false
- retryJob.Callback()
+ heartbeat:Fire(60)
  assert(count(ecology.ActiveFoods)==2,"food population recovers when a safe spaced location becomes available")
  ecology.Stop()
- print("Ecology: contested rewards, server reach, physical prey size, rare food, bounded respawns and lifecycle assertions passed")
+ -- Player-only tonics expire independently of accelerated spawn timers, so
+ -- ignored consumables cannot gradually fill every ordinary food slot.
+ local previousNextNumber=random.NextNumber
+ random.NextNumber=function(self,minimum,maximum)
+  if not minimum then return .025 end
+  return previousNextNumber(self,minimum,maximum)
+ end
+ local beforeExpiryJobs=#delayed
+ ecology.Start(world,handlers)
+ random.NextNumber=previousNextNumber
+ local consumedTonic,consumedTonicEntry=next(ecology.ActiveFoods)
+ assert(consumedTonicEntry.Spec.Buff and count(ecology.ActiveFoods)==2,"expiry fixture spawns two player tonics")
+ a.Character.HumanoidRootPart.CFrame=frame(consumedTonicEntry.Position)
+ assert(ecology.TryEat(a,consumedTonic),"one tonic is claimed before its expiry")
+ local beforeExpiryAwards=awarded
+ assert(#delayed-beforeExpiryJobs==2,"each tonic schedules exactly one lifetime callback")
+ for index=beforeExpiryJobs+1,#delayed do
+  assert(delayed[index].Seconds==300,"unclaimed tonic lifetime is five real minutes")
+  delayed[index].Callback()
+  delayed[index].Callback()
+ end
+ assert(count(ecology.ActiveFoods)==0 and count(ecology.PendingFoods)==2 and awarded==beforeExpiryAwards,
+  "expiry recycles one slot without rewards and neither repeats nor respawns already consumed tonics")
+ ecology.Stop()
+ for index=beforeExpiryJobs+1,#delayed do delayed[index].Callback() end
+ assert(count(ecology.ActiveFoods)==0 and count(ecology.PendingFoods)==0,
+  "tonic lifetime callbacks cannot restart stopped ecology")
+ local foodChunk=assert(loadstring(foodSource)); setfenv(foodChunk,environment)
+ local actualFoodModels=foodChunk()
+ local previousColor
+ for _, spec in ipairs(config.BuffFoods) do
+  local bottle=actualFoodModels.Create(spec,workspace,false)
+  assert(bottle:GetAttribute("BuffType")==spec.Buff and bottle:GetAttribute("BuffDuration")==60
+   and bottle:GetAttribute("Hunger")==0 and bottle:GetAttribute("RareFood")==false,
+   "rendered tonic metadata has its temporary effect and never advertises a mutation or fullness reward")
+  assert(bottle.PotionGlass.Material=="glass" and bottle.PotionGlass.Transparency>.2
+   and bottle.PotionLiquid.Material=="neon" and bottle.Cork and bottle.GoldCollar,
+   "each tonic has a readable translucent bottle, luminous liquid and fitted stopper")
+  assert(string.find(bottle.Root.FoodCaption._children[1].Text,"60 giây",1,true),
+   "tonic caption displays its one-minute duration")
+  assert(not previousColor or bottle.PotionLiquid.Color[1]~=previousColor[1],"tonic kinds use distinct liquid colors")
+  previousColor=bottle.PotionLiquid.Color
+  local parts,particles=0,0
+  local function inspect(instance)
+   if instance.ClassName=="Part" or instance.ClassName=="WedgePart" then
+    parts+=1
+    assert(instance.Anchored and not instance.CanCollide,"tonic decoration cannot block movement")
+   elseif instance.ClassName=="ParticleEmitter" then
+    particles+=1
+    assert(instance.Rate<=3 and instance.Texture,"tonic uses a small explicit-texture particle budget")
+   end
+   for _, child in ipairs(instance._children) do inspect(child) end
+  end
+  inspect(bottle)
+  assert(parts>=10 and parts<=25 and particles==1,"tonic silhouette is detailed within a modest rendering budget")
+  bottle:Destroy()
+ end
+ print("Ecology: claims, hunting buffs, tonic rarity, half-speed AI, dynamic population/pass spawn rates, bounded reservations and lifecycle passed")
 end

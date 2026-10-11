@@ -20,7 +20,8 @@ def main():
     args = parser.parse_args()
     spec = (ROOT / "tests/ecology.spec.luau").read_text(encoding="utf-8")
     source = (ROOT / "src/server/Ecology.luau").read_text(encoding="utf-8")
-    runner = "local run = (function()\n" + spec + "\nend)()\nrun(" + long_string(source) + ")\n"
+    food_source = (ROOT / "src/shared/FoodModels.luau").read_text(encoding="utf-8")
+    runner = "local run = (function()\n" + spec + "\nend)()\nrun(" + long_string(source) + "," + long_string(food_source) + ")\n"
     with tempfile.TemporaryDirectory(prefix="evolution-ecology-") as directory:
         path = Path(directory) / "run.luau"
         path.write_text(runner, encoding="utf-8")

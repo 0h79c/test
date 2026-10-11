@@ -89,6 +89,96 @@ class Animal:
                          motion="Leg", phase=phase)
 
 
+def articulate_limbs(a):
+    """Replace straight pill legs with connected shoulders, knees and ankles.
+
+    Every toe, cuff and claw follows the same lower-leg joint as its foot. The
+    named hip/knee coordinates are also consumed by the procedural gait; the
+    model therefore remains connected when it crouches, trots or bounds.
+    """
+    # (hip, knee, ankle, upper width, lower width), in the right-hand half.
+    rigs = {
+        "Mouse": ((.58,.85,-.70),(.60,.40,-.55),(.62,.20,-.74),.30,.19,
+                  (.63,.87,.85),(.72,.43,1.00),(.62,.20,.83),.46,.23),
+        "Frog": ((.78,.86,-.60),(.99,.40,-.77),(1.08,.14,-1.30),.31,.21,
+                 (.93,.77,.56),(1.35,.39,1.19),(1.18,.14,.96),.65,.33),
+        "Turtle": ((1.00,.74,-.80),(1.17,.39,-.68),(1.10,.19,-.86),.49,.34,
+                   (1.00,.73,.88),(1.23,.36,1.18),(1.10,.19,1.00),.52,.33),
+        "Rabbit": ((.46,1.09,-.74),(.48,.56,-.64),(.46,.23,-.91),.31,.23,
+                   (.66,1.06,.65),(.84,.48,.94),(.74,.21,.43),.74,.33),
+        "Cat": ((.53,1.43,-.83),(.58,.69,-.62),(.56,.20,-.91),.43,.29,
+                (.57,1.35,.92),(.66,.66,1.17),(.56,.20,.92),.61,.30),
+        "Hound": ((.59,1.75,-.96),(.62,.81,-.76),(.61,.20,-.97),.50,.30,
+                  (.60,1.64,1.06),(.75,.78,1.41),(.61,.20,1.14),.68,.33),
+        "Monkey": ((.65,2.03,.05),(.96,1.27,-.11),(1.14,.59,-.43),.39,.33,
+                   (.43,1.01,.26),(.52,.56,.45),(.43,.18,-.04),.50,.29),
+        "Cheetah": ((.47,2.03,-.98),(.51,.92,-.68),(.49,.20,-1.03),.39,.23,
+                    (.48,1.99,1.10),(.65,1.03,1.45),(.49,.20,1.15),.68,.28),
+        "Kangaroo": ((.65,2.22,-.08),(.67,1.95,-.51),(.56,1.72,-1.01),.26,.20,
+                     (.62,1.40,.36),(.84,.68,.72),(.69,.25,-.10),.77,.38),
+        "Gorilla": ((1.11,2.33,-.04),(1.47,1.33,-.25),(1.58,.39,-.64),.88,.72,
+                    (.63,1.18,.32),(.76,.63,.49),(.66,.22,-.03),.78,.45),
+        "Pegasus": ((.60,2.13,-.85),(.63,.97,-.69),(.62,.35,-.90),.49,.25,
+                    (.62,2.01,1.12),(.76,1.13,1.52),(.62,.35,1.21),.75,.30),
+        "Phoenix": ((.40,1.02,.10),(.43,.56,.21),(.40,.19,-.03),.28,.18),
+        "WhiteDragon": ((.86,1.64,-.76),(.97,.73,-.56),(.92,.24,-.92),.66,.40,
+                        (.89,1.58,1.08),(1.13,.80,1.46),(.92,.24,1.17),.86,.44),
+    }
+    spec = rigs.get(a.name)
+    if not spec:
+        return
+    old_legs = [p for p in a.parts if p["motion"] == "Leg"]
+    color = next((p["color"] for p in old_legs if p["name"] in {
+        "Leg","LongLeg","FrontArm","LongArm","ShortArm","LongForearm","ForePaw"}),
+        next((p["color"] for p in a.parts if p["name"] in {"Body","Torso","BarrelChest"}), a.parts[0]["color"]))
+    # Mammals with pink palms still have fur over the limbs.
+    if a.name == "Mouse": color = (150,163,180)
+    if a.name == "Rabbit": color = (229,218,203)
+    removed = {"Leg","LongLeg","FrontArm","LongArm","ShortArm","LongForearm"}
+    a.parts = [p for p in a.parts if p["name"] not in removed]
+    if a.name == "Rabbit":
+        for p in a.parts:
+            if p["name"] == "ForePaw":
+                p["size"],p["position"] = (.37,.27,.59),(p["position"][0],.18,-.94)
+    limb_count = len(spec)//5
+    fronts = {"FrontToe","WebbedFrontFoot","ForePaw","PawFinger","Hand","Finger",
+              "KnuckleHand","Knuckle","Sock"}
+    backs = {"BackThigh","BackToe","WebbedBackFoot","Haunch","HindPaw","Thigh",
+             "LongFoot","ToeDetail","Foot"}
+    joints = []
+    for side in (-1,1):
+        for group in range(limb_count):
+            raw_hip,raw_knee,raw_ankle,upper_width,lower_width = spec[group*5:group*5+5]
+            hip,knee,ankle = [(side*p[0],p[1],p[2]) for p in (raw_hip,raw_knee,raw_ankle)]
+            front = group == 0
+            phase = side if front else -side
+            upper_name = "LongArm" if a.name == "Monkey" and front else "UpperLeg"
+            lower_name = "LongForearm" if a.name == "Gorilla" and front else "LowerLeg"
+            first = len(a.parts)
+            a.rod(upper_name,hip,knee,upper_width,color,"Leg",phase)
+            a.add("Knee",(lower_width*1.22,)*3,knee,color,motion="Leg",phase=phase)
+            a.rod(lower_name,knee,ankle,lower_width,color,"Leg",phase)
+            for p in a.parts[first:]:
+                p.update(pivot=hip,knee=knee,leg_side=side,leg_front=front,
+                         leg_lower=p["name"] != upper_name)
+            joints.append((side,front,hip,knee,ankle))
+    for p in a.parts:
+        name,x,z = p["name"],p["position"][0],p["position"][2]
+        if p.get("knee"):
+            continue
+        if p["motion"] != "Leg" and name not in {"BackThigh","Haunch","Thigh"}:
+            continue
+        side = -1 if x < 0 else 1
+        choices = [j for j in joints if j[0] == side]
+        if len(choices)>1:
+            if name in backs: choices = [j for j in choices if not j[1]]
+            elif name in fronts and name != "Sock": choices = [j for j in choices if j[1]]
+        chosen = min(choices,key=lambda j:(x-j[4][0])**2+(z-j[4][2])**2)
+        _,front,hip,knee,_ = chosen
+        p.update(motion="Leg",phase=side if front else -side,pivot=hip,knee=knee,
+                 leg_side=side,leg_front=front,leg_lower=name not in {"BackThigh","Haunch","Thigh"})
+
+
 def _snail():
     a = Animal("Snail", (1.85, 1.9, 3.4))
     skin, shell, ridge = (180, 213, 106), (190, 133, 76), (116, 72, 46)
@@ -216,8 +306,12 @@ def _cat():
     a.add("Chest", (1.1,1.19,.68), (0,1.09,-.93), WHITE)
     a.add("Head", (1.5,1.33,1.28), (0,1.78,-1.06), fur)
     for side in (-1,1):
-        a.add("PointEar", (.56,.73,.47), (side*.53,2.46,-.9), fur, rotation=(0,side*20,side*-10),class_name="WedgePart",shape="Block")
-        a.add("EarPink", (.26,.39,.1), (side*.53,2.45,-1.14), (226,145,145),class_name="WedgePart",shape="Block")
+        # The triangular face lies in X/Y, towards the animal's front (-Z).
+        # A default upright WedgePart shows a rectangular X/Y face instead.
+        a.triangle("PointEar",((side*.22,2.19,-1.04),(side*.80,2.19,-1.04),
+                               (side*.72,2.99,-1.04)),fur,thickness=.22)
+        a.triangle("EarPink",((side*.34,2.29,-1.168),(side*.68,2.29,-1.168),
+                              (side*.68,2.78,-1.168)),(226,145,145),thickness=.025)
         for n in range(3):
             a.add("TabbyStripe", (.13,.68,.18), (side*.76,1.37,.95-n*.55), stripe,rotation=(0,0,side*-20))
             a.rod("Whisker", (side*.3,1.56,-1.65), (side*.99,1.59+(n-1)*.15,-1.77), .03, WHITE)
@@ -473,6 +567,96 @@ ACCENT_NAMES = {"Shell", "ShellScute", "ShellScuteSide", "Mane", "Horn", "HornTi
 DARK_NAMES = {"Spot", "BackSpot", "TabbyStripe", "TailBand", "TailTip", "ShellSpiral"}
 
 
+def refine_silhouette(a):
+    """Small, species-specific anatomical shapes visible at gameplay distance."""
+    if a.name == "Snail":
+        for side in (-1,1):
+            a.add("ShellOpening",(.18,1.15,.85),(side*.71,.90,-.25),(105,70,51),rotation=(0,side*-23,0))
+            a.rod("LowerLip",(side*.38,.40,-1.58),(side*.13,.35,-1.74),.075,(215,230,152))
+        a.add("NeckFold",(.87,.26,.75),(0,.50,-1.01),(159,193,100))
+    elif a.name == "Caterpillar":
+        for n in range(6):
+            z=-1.6+n*.64
+            for side in (-1,1):
+                a.add("Spiracle",(.06,.08,.12),(side*(.685-n*.023),.82,z),(67,123,65),motion="Segment",phase=n)
+                a.add("SoftBristle",(.035,.22,.045),(side*.43,1.24,z),(224,233,151),rotation=(0,0,side*-25),motion="Segment",phase=n)
+    elif a.name in {"Mouse","Rabbit","Cat","Hound","Cheetah"}:
+        colors={"Mouse":(137,152,170),"Rabbit":(213,198,179),"Cat":(211,140,69),"Hound":(172,111,68),"Cheetah":(221,171,72)}
+        body=next(p for p in a.parts if p["name"] in {"Body","LeanBody"})
+        xradius,yradius,zradius=(v/2 for v in body["size"])
+        _,center_y,center_z=body["position"]
+        for side in (-1,1):
+            # Shoulders and haunches close the former peg-leg silhouette.
+            for front in (True,False):
+                z=center_z+zradius*(-.57 if front else .57)
+                a.add("ShoulderContour" if front else "HipContour",
+                      (xradius*.7,yradius*1.23,zradius*.71),
+                      (side*xradius*.65,center_y-.03,z),colors[a.name])
+        if a.name in {"Cat","Hound","Cheetah"}:
+            for side in (-1,1):
+                for n in range(3):
+                    a.add("MuzzleDot",(.035,.04,.035),
+                          (side*(.17+n*.063),1.56 if a.name=="Cat" else 2.02 if a.name=="Hound" else 2.22,
+                           -1.78 if a.name=="Cat" else -2.51 if a.name=="Hound" else -2.15),
+                          (99,76,58),motion="Head",pivot=HEADS[a.name],skin="Detail")
+        if a.name == "Rabbit":
+            for side in (-1,1):
+                a.add("BrowTuft",(.28,.14,.17),(side*.34,1.99,-1.49),(249,240,222),motion="Head",pivot=HEADS[a.name])
+        if a.name == "Cat":
+            a.add("Chin",(.49,.24,.31),(0,1.34,-1.62),WHITE,motion="Head",pivot=HEADS[a.name])
+        if a.name == "Cheetah":
+            for side in (-1,1):
+                a.add("EyeBrow",(.23,.1,.14),(side*.28,2.76,-1.87),(210,159,64),motion="Head",pivot=HEADS[a.name])
+    elif a.name == "Frog":
+        for side in (-1,1):
+            a.rod("MouthCorner",(side*.48,.93,-1.45),(side*.80,1.01,-1.30),.04,(39,104,67),"Head")
+            a.add("Nostril",(.08,.055,.055),(side*.22,1.28,-1.43),(37,115,77))
+        a.add("Throat",(1.23,.52,.47),(0,.61,-1.03),(218,231,147))
+    elif a.name == "Turtle":
+        a.add("Plastron",(2.18,.28,2.59),(0,.44,.13),(219,199,126))
+        for side in (-1,1):
+            for n in range(3):
+                a.add("NeckScale",(.12,.09,.11),(side*(.12+n*.085),1.02,-1.87),(177,191,120),motion="Head",pivot=HEADS[a.name])
+    elif a.name == "Monkey":
+        for side in (-1,1):
+            a.add("Brow",(.42,.13,.16),(side*.27,2.87,-.99),(127,81,56),motion="Head",pivot=HEADS[a.name])
+            a.add("Thumb",(.20,.32,.20),(side*.94,.64,-.54),(225,183,136),motion="Leg",phase=side)
+        a.add("Chin",(.54,.23,.31),(0,2.13,-1.01),(212,163,116),motion="Head",pivot=HEADS[a.name])
+    elif a.name == "Kangaroo":
+        for side in (-1,1):
+            a.add("ChestContour",(.57,1.05,.87),(side*.45,2.03,-.08),(203,159,115))
+            a.add("EyeBrow",(.24,.10,.18),(side*.27,3.62,-1.06),(159,113,81),motion="Head",pivot=HEADS[a.name])
+            for n in range(2):
+                a.add("ToeClaw",(.10,.075,.20),(side*.69+(n-.5)*.15,.17,-.86),(93,81,70),motion="Leg",phase=-side)
+    elif a.name == "Gorilla":
+        for side in (-1,1):
+            a.add("Pectoral",(.76,.85,.26),(side*.38,2.08,-.85),(110,120,131))
+            a.add("Thumb",(.28,.52,.28),(side*1.20,.40,-.65),(131,139,147),motion="Leg",phase=side)
+        a.add("SagittalCrest",(.68,.43,.62),(0,3.73,-.08),(62,67,80))
+        a.add("Chin",(.78,.27,.31),(0,2.40,-1.12),(113,123,135),motion="Head",pivot=HEADS[a.name])
+    elif a.name == "Pegasus":
+        for side in (-1,1):
+            a.add("HorseShoulder",(.76,1.27,1.08),(side*.59,1.88,-.64),(229,223,243))
+            a.add("HorseHaunch",(.87,1.24,1.22),(side*.59,1.83,1.00),(229,223,243))
+            a.add("LipLine",(.12,.045,.45),(side*.34,2.80,-2.28),(170,154,186),motion="Head",pivot=HEADS[a.name])
+            for n in range(4):
+                a.add("WingCoverts",(.52,.18,.67),(side*(1.25+n*.30),2.45+n*.04,.10),
+                      (230,223,244),rotation=(0,side*(12+n*7),side*13),motion="Wing",phase=side)
+    elif a.name == "Phoenix":
+        for side in (-1,1):
+            for n in range(5):
+                a.add("WingCoverts",(.43,.19,.73),(side*(1.03+n*.36),2.49+n*.06,.14),
+                      (253,176,64),rotation=(0,side*(10+n*7),side*15),motion="Wing",phase=side)
+            a.add("BrowFeather",(.32,.15,.31),(side*.32,3.53,-.98),(214,75,42),motion="Head",pivot=HEADS[a.name])
+        a.add("BeakHook",(.19,.33,.25),(0,2.88,-1.75),(244,190,77),class_name="WedgePart",shape="Block",motion="Head",pivot=HEADS[a.name])
+    elif a.name == "WhiteDragon":
+        for side in (-1,1):
+            a.add("DragonHaunch",(.99,1.29,1.28),(side*.83,1.35,1.03),(223,239,245))
+            a.add("JawHinge",(.38,.45,.45),(side*.55,2.91,-1.98),(210,231,238),motion="Head",pivot=HEADS[a.name])
+            a.add("CheekScale",(.16,.22,.37),(side*.67,3.05,-1.73),(169,211,223),motion="Head",pivot=HEADS[a.name])
+            a.add("Fang",(.13,.23,.14),(side*.34,2.78,-2.72),(255,247,218),class_name="WedgePart",shape="Block",motion="Head",pivot=HEADS[a.name])
+
+
 def polish(animal):
     """Hand-authored details, and joint pivots shared across connected anatomy.
 
@@ -621,6 +805,9 @@ def polish(animal):
             radial=max(.05,1-((z-.32)/1.425)**2)
             p["position"]=(x,1.64+.93*math.sqrt(radial)+.19,z)
 
+    refine_silhouette(a)
+    articulate_limbs(a)
+    body_pivot = (0,a.collision[1]*.55,.1)
     for p in a.parts:
         name, (x, y, z) = p["name"], p["position"]
         p["skin"] = p["skin"] or ("Detail" if name in DETAIL_NAMES else "Light" if name in PALE_NAMES
@@ -631,7 +818,7 @@ def polish(animal):
             # A single shared anchor prevents the tail's rods drifting apart.
             first = next(q for q in a.parts if q["motion"] == "Tail")
             p["pivot"] = first["position"]
-        elif p["motion"] == "Leg":
+        elif p["motion"] == "Leg" and not p.get("knee"):
             p["pivot"] = (x, max(.35, a.collision[1]*.57), z)
             # Match foot details to the same hip pivot for that gait phase.
             p["pivot"] = (math.copysign(a.collision[0]*.29,x), max(.35,a.collision[1]*.57),
@@ -641,8 +828,11 @@ def polish(animal):
         elif name in DETAIL_NAMES or name in {"Head", "HorseHead", "Snout", "Jaw", "Face", "Muzzle", "LongMuzzle",
                 "RoundEar", "EarInside", "LongEar", "PointEar", "EarPink", "FloppyEar", "EyeBulge", "StalkEye",
                 "EyeStalk", "Feeler", "Antenna", "AntennaTip", "Horn", "HornTip", "CheekFin", "FlameCrest", "Cheek",
-                "FrontTooth", "Beak", "BeakSeam", "Brow", "EyeBrow", "Forelock", "HairTuft", "Temple", "ForeheadStripe"}:
+                "FrontTooth", "Beak", "BeakSeam", "Brow", "EyeBrow", "Forelock", "HairTuft", "Temple", "ForeheadStripe", "Ear", "SagittalCrest"}:
             p["motion"], p["pivot"] = "Head", HEADS[a.name]
+        if not p["pivot"]:
+            p["pivot"] = HEADS[a.name] if p["motion"] == "Head" else body_pivot
+        p["body_pivot"] = body_pivot
     return a
 
 
@@ -710,7 +900,12 @@ def mutation_geometry(animal):
                       (math.sin(angle)*radius,top+.63,head[2]+math.cos(angle)*radius), (247,218,151),
                       shape="Block", rotation=(0,math.degrees(angle)+90,0), material="Neon", motion="Halo", phase=n,
                       pivot=(0,top+.63,head[2]), transparency=.15)
+        body_pivot = (0,animal.collision[1]*.55,.1)
         for p in a.parts:
+            p["body_pivot"] = body_pivot
+            if p["motion"] == "Wing":
+                shared = next((q for q in animal.parts if q["motion"] == "Wing" and q["phase"] == p["phase"]),None)
+                if shared: p["pivot"] = shared["pivot"]
             p["skin"] = "Mutation"
             if not p["motion"]:
                 p["motion"], p["pivot"] = ("Head", head) if p["name"] in {

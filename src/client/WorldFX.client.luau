@@ -165,6 +165,18 @@ remote.OnClientEvent:Connect(function(action,data)
    ring(position,Color3.fromRGB(159,235,154),0.7,5,0.5)
    Debris:AddItem(part,1.6)
   end
+ elseif action == "Buff" and type(data) == "table" then
+  local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+  local position = root and root.Position or (data.Position and point(data.Position))
+  if position then
+   local colors = {Speed=Color3.fromRGB(114,227,243),Hunt=Color3.fromRGB(255,186,109),Giant=Color3.fromRGB(214,173,255)}
+   local color = colors[data.Kind] or colors.Speed
+   local part = anchor(position)
+   part.Name = "BuffPickup"
+   particles(part,color,32)
+   ring(position-Vector3.new(0,1.5,0),color,1,10,0.8)
+   Debris:AddItem(part,1.8)
+  end
  elseif action == "Mutation" or action == "Evolution" then
   local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
   if root then

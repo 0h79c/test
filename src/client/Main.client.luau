@@ -21,9 +21,11 @@ local P = {BG=Color3.fromRGB(12,23,23), Panel=Color3.fromRGB(20,38,36),
  Text=Color3.fromRGB(247,248,234), Muted=Color3.fromRGB(164,188,175)}
 local remote, state
 local reviveReadyAt, reviveExpiresAt = 0, 0
+local activeBuffs = {}
 local dropRecords, dropMarkers, mapViews = {}, {}, {}
 local modalPanels, cards = {}, {}
 local function send(action, value)
+ if action ~= "Sync" and (not state or state.Loading) then return end
  if remote then remote:FireServer(action, value) end
 end
 local function decorate(frame, color, radius)
@@ -122,6 +124,59 @@ local coinLabel = label(hud, "0  COINS", UDim2.fromOffset(138,23), UDim2.fromOff
 coinLabel.TextXAlignment = Enum.TextXAlignment.Right
 local evolveButton = button(gui, "TIẾN HÓA  [G]", UDim2.fromOffset(344,40), UDim2.fromOffset(22,179), function() send("Evolve") end, Color3.fromRGB(64,113,72))
 evolveButton.Visible = false
+local buffTray = Instance.new("Frame")
+buffTray.Name = "ActiveBuffs"
+buffTray.BackgroundTransparency = 1
+buffTray.Size = UDim2.fromOffset(344,48)
+buffTray.Position = UDim2.fromOffset(22,179)
+buffTray.Visible = false
+buffTray.Parent = gui
+local buffDefinitions = {
+ Speed={Title="TỐC +50%",Color=Color3.fromRGB(114,227,243)},
+ Hunt={Title="SĂN +2 BẬC",Color=Color3.fromRGB(255,186,109)},
+ Giant={Title="KHỔNG LỒ ×5",Color=Color3.fromRGB(214,173,255)},
+}
+local buffChips = {}
+for index,kind in ipairs({"Speed","Hunt","Giant"}) do
+ local definition = buffDefinitions[kind]
+ local chip = frame(buffTray,UDim2.fromOffset(110,48),UDim2.fromOffset((index-1)*117,0),P.BG)
+ chip.Name = "Buff"..kind
+ chip.Visible = false
+ local title = label(chip,definition.Title,UDim2.new(1,-8,0,22),UDim2.fromOffset(4,3),10,definition.Color)
+ local remaining = label(chip,"",UDim2.new(1,-8,0,17),UDim2.fromOffset(4,24),11,P.Text)
+ local progress = frame(chip,UDim2.new(1,-14,0,2),UDim2.fromOffset(7,43),definition.Color)
+ progress.BackgroundTransparency = 0
+ buffChips[kind] = {Frame=chip,Title=title,Remaining=remaining,Progress=progress}
+end
+local function refreshBuffs(now)
+ local count = 0
+ for _,kind in ipairs({"Speed","Hunt","Giant"}) do
+  local chip,record = buffChips[kind],activeBuffs[kind]
+  local remaining = record and math.max(0,record.ExpiresAt-now) or 0
+  chip.Frame.Visible = remaining > 0 and state ~= nil and not state.Loading
+  if chip.Frame.Visible then
+   chip.Frame.Position = UDim2.fromOffset(count*117,0)
+   count += 1
+   chip.Title.Text = kind == "Hunt" and ("SĂN +"..tostring(record.Tiers or 2).." BẬC") or buffDefinitions[kind].Title
+   chip.Remaining.Text = tostring(math.ceil(remaining)).."s"
+   chip.Progress.Size = UDim2.fromOffset(96*math.clamp(remaining/60,0,1),2)
+  end
+ end
+ buffTray.Visible = count > 0
+end
+local function receiveBuffs(records)
+ local now = workspace:GetServerTimeNow()
+ activeBuffs = {}
+ for kind,record in pairs(type(records) == "table" and records or {}) do
+  if buffDefinitions[kind] and type(record) == "table" then
+   local expires = tonumber(record.ExpiresAt) or (now+(tonumber(record.Remaining) or 0))
+   if expires == expires and expires < math.huge and expires > now then
+    activeBuffs[kind] = {ExpiresAt=expires,Tiers=math.clamp(math.floor(tonumber(record.Tiers) or 2),2,4)}
+   end
+  end
+ end
+ refreshBuffs(now)
+end
 local compass = frame(gui, UDim2.fromOffset(214,30), UDim2.new(0.5,-107,0,18))
 local compassLabel = label(compass, "BẮC   ·   000°", UDim2.fromScale(1,1), UDim2.new(), 11, P.Muted)
 local miniPanel = frame(gui, UDim2.fromOffset(220,237), UDim2.new(1,-22,0,18))
@@ -281,16 +336,16 @@ shopScroll.Position = UDim2.fromOffset(16,96)
 shopScroll.BackgroundTransparency = 1
 shopScroll.BorderSizePixel = 0
 shopScroll.ScrollBarThickness = 4
-shopScroll.CanvasSize = UDim2.fromOffset(0,370)
+shopScroll.CanvasSize = UDim2.fromOffset(0,408)
 shopScroll.Parent = shop
-local passCard = frame(shopScroll,UDim2.new(1,-5,0,202),UDim2.fromOffset(0,0))
+local passCard = frame(shopScroll,UDim2.new(1,-5,0,238),UDim2.fromOffset(0,0))
 left(label(passCard,"EXPLORER PASS",UDim2.new(1,-28,0,27),UDim2.fromOffset(14,12),17,P.Gold))
-left(label(passCard,"+50% độ no từ thức ăn  ·  +50% Coins nhặt được\n2 lượt reroll miễn phí / lần ăn thức ăn đột biến\nHồi sinh gần chỗ chết · hồi chiêu 3 phút",UDim2.new(1,-28,0,83),UDim2.fromOffset(14,48),13))
-local passButton = button(passCard,"Chưa cấu hình Game Pass",UDim2.new(1,-28,0,39),UDim2.fromOffset(14,146),function()
+left(label(passCard,"+50% độ no từ thức ăn  ·  +50% Coins nhặt được\n+100% tốc độ xuất hiện thức ăn trong bán kính 50 m\n2 lượt reroll miễn phí / lần ăn thức ăn đột biến\nHồi sinh gần chỗ chết · hồi chiêu 3 phút",UDim2.new(1,-28,0,116),UDim2.fromOffset(14,48),13))
+local passButton = button(passCard,"Chưa cấu hình Game Pass",UDim2.new(1,-28,0,39),UDim2.fromOffset(14,182),function()
  if state and state.CommerceConfig and (state.CommerceConfig.PassId or 0) > 0 then send("BuyPass")
  else toast("Chủ game cần tạo Game Pass và nhập PassId trong Config.Commerce.") end
 end,Color3.fromRGB(104,88,45))
-local dropCard = frame(shopScroll,UDim2.new(1,-5,0,146),UDim2.fromOffset(0,216))
+local dropCard = frame(shopScroll,UDim2.new(1,-5,0,146),UDim2.fromOffset(0,252))
 left(label(dropCard,"GỌI THÍNH",UDim2.new(1,-28,0,27),UDim2.fromOffset(14,10),17,P.Purple))
 left(label(dropCard,"Báo vị trí trước 3 phút · Coins + 20–50% độ no\n1 thức ăn đột biến với xác suất quý hiếm ×3",UDim2.new(1,-28,0,45),UDim2.fromOffset(14,42),12,P.Muted))
 local buyDropButton = button(dropCard,"Chưa cấu hình Developer Product",UDim2.new(1,-28,0,37),UDim2.fromOffset(14,98),function()
@@ -339,7 +394,9 @@ local instruction = label(gui,"WASD: di chuyển  ·  Space: nhảy  ·  E: ăn 
 instruction.AnchorPoint = Vector2.new(0.5,1)
 local loading = label(hud,"",UDim2.new(1,-32,0,15),UDim2.fromOffset(16,136),9,P.Muted)
 local function update(data)
+ if type(data) ~= "table" then return end
  state = data
+ receiveBuffs(data.Buffs)
  local form = math.clamp(data.Form or 1,1,#Config.Species)
  local species = Config.Species[form]
  local mutations = data.Mutations or {}
@@ -352,7 +409,7 @@ local function update(data)
  hungerLabel.Text = string.format("ĐỘ NO  %.1f%%",fullness)
  TweenService:Create(hungerFill,TweenInfo.new(0.35,Enum.EasingStyle.Quad),{Size=UDim2.fromScale(fullness/100,1)}):Play()
  coinLabel.Text = formatNumber(data.Coins).."  COINS"
- evolveButton.Visible = fullness >= 100 and (data.Unlocked or 1) < #Config.Species
+ evolveButton.Visible = not data.Loading and fullness >= 100 and (data.Unlocked or 1) < #Config.Species
  loading.Text = data.Loading and "Đang tải tiến trình…" or (data.ReadOnly and "Chơi thử · tiến trình không lưu" or (data.PassOwned and "Explorer Pass đang hoạt động" or "Ăn thức ăn rải rác để tiến hóa"))
  rerollButton.Visible = (data.FreeRerolls or 0) > 0
  rerollButton.Text = "REROLL MIỄN PHÍ  ·  "..tostring(data.FreeRerolls or 0)
@@ -441,6 +498,10 @@ remote.OnClientEvent:Connect(function(action,data)
  elseif action == "Food" then
   local gain = type(data) == "table" and data.Gain or 0
   if gain and gain > 0 then toast(string.format("+%.1f%% độ no%s",gain,(data.Coins or 0) > 0 and ("  ·  +"..formatNumber(data.Coins).." Coins") or "")) end
+  if gain == 0 and type(data) == "table" and data.EffectName then toast(data.EffectName.."  ·  60 giây") end
+ elseif action == "Buff" and type(data) == "table" and buffDefinitions[data.Kind] then
+  local details = data.Kind == "Hunt" and ("Săn AI vượt "..tostring(data.Tiers or 2).." bậc") or (data.Kind == "Giant" and "Kích thước ×5" or "Tốc chạy +50%")
+  toast((data.Name or "Thuốc hiếm").."  ·  "..details.."  ·  "..tostring(data.Duration or 60).." giây")
  elseif action == "Attack" then
   attackButton.Text = "ĐẨY!"
   task.delay(0.8,function() attackButton.Text = "ĐẨY  [F]" end)
@@ -477,7 +538,7 @@ local function alignCamera(character)
 end
 player.CharacterAdded:Connect(alignCamera)
 if player.Character then alignCamera(player.Character) end
-local scaledWidgets = {hud,evolveButton,miniPanel,controls,rerollButton,reviveButton}
+local scaledWidgets = {hud,evolveButton,buffTray,miniPanel,controls,rerollButton,reviveButton}
 local widgetScales = {}
 for _, widget in ipairs(scaledWidgets) do
  local scale = Instance.new("UIScale")
@@ -491,7 +552,10 @@ RunService.RenderStepped:Connect(function()
  local width = camera.ViewportSize.X
  local scale = math.clamp(width/1100,0.56,1)
  for _, widgetScale in pairs(widgetScales) do widgetScale.Scale = scale end
+ evolveButton.Position = UDim2.fromOffset(22,18+154*scale+7)
+ buffTray.Position = UDim2.fromOffset(22,18+154*scale+7+(evolveButton.Visible and (40*scale+7) or 0))
  compass.Visible = width > 800
+ miniPanel.Visible = width >= 650
  instruction.Visible = width > 650 and not UserInputService.TouchEnabled
  local character = player.Character
  local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -506,6 +570,7 @@ RunService.RenderStepped:Connect(function()
  local now = workspace:GetServerTimeNow()
  if now-lastTick < 0.25 then return end
  lastTick = now
+ refreshBuffs(now)
  if state and state.PassOwned then
   local cooldown = math.max(0,math.ceil(reviveReadyAt-now))
   reviveButton.Visible = reviveExpiresAt > now or cooldown > 0

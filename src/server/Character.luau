@@ -148,6 +148,14 @@ function Character.Apply(player, data)
  local species = Config.Species[form]
  local mutation = Config.Mutation(mutations[tostring(form)])
  local definition = AnimalModels.Definitions[form]
+ local buffModifiers = typeof(data.BuffModifiers) == "table" and data.BuffModifiers or {}
+ local function multiplier(value, maximum)
+  local number = tonumber(value)
+  if not number or number ~= number then return 1 end
+  return math.clamp(number, 1, maximum)
+ end
+ local buffSpeed = multiplier(buffModifiers.Speed, Config.Buffs.SpeedMultiplier)
+ local buffScale = multiplier(buffModifiers.Scale, Config.Buffs.GiantScale)
 
  disconnect(character)
  for _, name in ipairs({"AnimalVisual", "AnimalCollider", "GlideForce", "GlideAttachment", "AuraAttachment"}) do
@@ -158,29 +166,35 @@ function Character.Apply(player, data)
  -- Preserve the Roblox control rig for both R6 and R15. Only the single
  -- collider touches the world; decorative geometry never blocks jumps.
  humanoid.UseJumpPower = true
- humanoid.WalkSpeed = species.WalkSpeed * mutation.Speed
+ humanoid.WalkSpeed = species.WalkSpeed * mutation.Speed * buffSpeed
  humanoid.JumpPower = species.JumpPower * mutation.Jump
  humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
  humanoid.AutoRotate = true
- local groundHeight
- if humanoid.RigType == Enum.HumanoidRigType.R6 then
-  humanoid.HipHeight = 0
-  local leg = character:FindFirstChild("Left Leg")
-  groundHeight = root.Size.Y / 2 + (leg and leg.Size.Y or 2)
- else
-  humanoid.HipHeight = 2
-  groundHeight = root.Size.Y / 2 + humanoid.HipHeight
- end
+ local r6 = humanoid.RigType == Enum.HumanoidRigType.R6
+ local leg = r6 and character:FindFirstChild("Left Leg") or nil
+ local legHeight = r6 and (leg and leg.Size.Y or 2) or 0
+ local baseGroundHeight = root.Size.Y / 2 + (r6 and legHeight or 2)
  for _, instance in ipairs(character:GetDescendants()) do hideAvatar(instance, character) end
 
- local scale = mutation.Scale
- scale = math.clamp(scale, 0.3, 1.5)
+ local mutationScale = math.clamp(mutation.Scale, 0.3, 1.5)
+ local scale = mutationScale * buffScale
  local collision = definition.Collider
  local colliderSize = Vector3.new(
-  math.clamp(collision[1] * scale, 0.95, 3.8),
-  math.clamp(collision[2] * scale, 0.7, 4.1),
-  math.clamp(collision[3] * scale, 1.4, 4.4)
- )
+  math.clamp(collision[1] * mutationScale, 0.95, 3.8),
+  math.clamp(collision[2] * mutationScale, 0.7, 4.1),
+  math.clamp(collision[3] * mutationScale, 1.4, 4.4)
+ ) * buffScale
+ -- A giant's floor probe must sit above its new feet. Preserve the floor
+ -- position while moving the intact control rig up or down, including a
+ -- respawn with an active potion. This does not add velocity on morphing.
+ local groundHeight = math.max(baseGroundHeight, colliderSize.Y / 2)
+ local previousGroundHeight = character:GetAttribute("AnimalGroundHeight") or baseGroundHeight
+ humanoid.HipHeight = groundHeight - root.Size.Y / 2 - legHeight
+ if math.abs(groundHeight - previousGroundHeight) > 0.001 then
+  local velocity = root.AssemblyLinearVelocity
+  root.CFrame = root.CFrame + Vector3.new(0, groundHeight - previousGroundHeight, 0)
+  root.AssemblyLinearVelocity = velocity
+ end
  humanoid.CameraOffset = Vector3.new(0,-groundHeight+math.max(.7,colliderSize.Y*.6),0)
  local collider = Instance.new("Part")
  collider.Name = "AnimalCollider"
@@ -278,6 +292,9 @@ function Character.Apply(player, data)
  character:SetAttribute("Mutation", mutation.Name)
  character:SetAttribute("MorphReady", true)
  character:SetAttribute("VisualScale", scale)
+ character:SetAttribute("AnimalGroundHeight", groundHeight)
+ character:SetAttribute("BuffGiant", buffScale > 1)
+ character:SetAttribute("BuffSpeed", buffSpeed > 1)
  return true
 end
 

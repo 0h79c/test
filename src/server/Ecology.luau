@@ -7,7 +7,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local FoodModels = require(ReplicatedStorage.Shared.FoodModels)
 local AnimalModels = require(ReplicatedStorage.Shared.AnimalModels)
 
-local Ecology = {ActiveFoods={}, ActiveNPCs={}}
+local Ecology = {ActiveFoods={}, ActiveNPCs={}, PendingFoods={}}
 local world, callbacks, rng, foodFolder, npcFolder, heartbeat
 local generation, npcSerial, elapsed = 0, 0, 0
 local EAT_RANGE = 8
@@ -31,10 +31,15 @@ function Ecology.InEatingRange(from, to)
  return horizontalDistance(from, to) <= EAT_RANGE and math.abs(from.Y - to.Y) <= 18
 end
 
-function Ecology.CanEatNPC(playerForm, npcForm, playerSize, npcSize)
+function Ecology.CanEatNPC(playerForm, npcForm, playerSize, npcSize, huntBonus)
  local function positiveFinite(value)
   return type(value) == "number" and value > 0 and value < math.huge
  end
+ -- The temporary hunting tonic permits the next 2–4 tiers without changing
+ -- the player's permanent evolution or relying on client-supplied prey data.
+ if positiveFinite(playerForm) and positiveFinite(npcForm) and type(huntBonus) == "number"
+  and huntBonus >= 2 and huntBonus <= 4 and huntBonus % 1 == 0
+  and npcForm <= playerForm + huntBonus then return true end
  -- A large mutation can hunt physically smaller wildlife even at the same tier.
  -- If sizes were supplied, malformed or incomplete sizes never permit a hunt.
  if playerSize ~= nil or npcSize ~= nil then
@@ -68,7 +73,13 @@ local function mutationSpec()
 end
 
 function Ecology.RollFood(random, biome)
- if random:NextNumber() < (Config.MutationFoodSpawnChance or .012) then return mutationSpec() end
+ local rarity = random:NextNumber()
+ local mutationChance = Config.MutationFoodSpawnChance or .012
+ if rarity < mutationChance then return mutationSpec() end
+ local buffs = Config.BuffFoods or {}
+ if rarity < mutationChance + (Config.BuffSpawnChance or .03) and #buffs > 0 then
+  return buffs[random:NextInteger(1, #buffs)]
+ end
  local eligible, total = {}, 0
  for _, spec in ipairs(foodSpecs()) do
   if not spec.Biomes or table.find(spec.Biomes, biome) then
@@ -92,38 +103,98 @@ local function isMutation(spec)
  return spec.Mutation == true or spec.Id == "mutation"
 end
 
-local function reserved(position)
+local function reserved(position, excluded)
  for _, entry in pairs(Ecology.ActiveFoods) do
   if horizontalDistance(position, entry.Position) < (Config.FoodMinimumSpacing or 70) then return true end
+ end
+ for entry in pairs(Ecology.PendingFoods) do
+  if entry ~= excluded and entry.Position
+   and horizontalDistance(position, entry.Position) < (Config.FoodMinimumSpacing or 70) then return true end
  end
  return false
 end
 
-local function spawnPosition(biome)
+local function spawnPosition(biome, excluded)
  for _ = 1, 45 do
   local position = world.RandomPosition(biome, rng)
-  if position and not reserved(position) then return position end
+  if position and not reserved(position, excluded) then return position end
  end
  return nil
 end
 
 local spawnFood
+local function reserveFoodDestination(entry)
+ local position = spawnPosition(entry.Biome, entry)
+ if not position and entry.PreviousGround then position = world.GroundPosition(entry.PreviousGround) end
+ if position and not reserved(position, entry) then
+  entry.Position = position
+  return true
+ end
+ entry.Position = nil
+ entry.RetryIn = 15
+ return false
+end
+
+local function queueFood(biome, remaining, previousGround)
+ local pending = {Biome=biome, Remaining=remaining, PreviousGround=previousGround, RetryIn=0}
+ reserveFoodDestination(pending)
+ Ecology.PendingFoods[pending] = true
+ return pending
+end
+
 local function respawnFood(entry)
- local currentGeneration = generation
  local waitTime = isMutation(entry.Spec) and rng:NextNumber(120, 300) or rng:NextNumber(35, 90)
- local function attempt()
-  if generation ~= currentGeneration then return end
-  local position = spawnPosition(entry.Biome)
-  if not position then position = world.GroundPosition(entry.GroundPosition) end
-  if position and not reserved(position) then
-   spawnFood(position, entry.Biome, Ecology.RollFood(rng, entry.Biome))
-  else
-   -- Every attempt is bounded; a temporarily crowded habitat must not lose a
-   -- food slot permanently or bypass safe terrain/spacing to fill that slot.
-   task.delay(15, attempt)
+ queueFood(entry.Biome, waitTime, entry.GroundPosition)
+end
+
+function Ecology.GlobalRespawnRate(playerCount, npcCount)
+ local settings = Config.FoodRespawn or {}
+ return 1 + math.max(0, playerCount - 1) * (settings.AdditionalPlayerRate or .25)
+  + math.max(0, npcCount) * (settings.PerAIRate or .1)
+end
+
+local function stepFoodRespawns(delta)
+ local online = Players:GetPlayers()
+ local livingNPCs = 0
+ for _, entry in pairs(Ecology.ActiveNPCs) do
+  if entry.Model.Parent and not entry.Claimed then livingNPCs += 1 end
+ end
+ local settings = Config.FoodRespawn or {}
+ local globalRate = Ecology.GlobalRespawnRate(#online, livingNPCs)
+ local passPositions = {}
+ if callbacks.HasPass then
+  for _, player in ipairs(online) do
+   local root = playerRoot(player)
+   if root and callbacks.HasPass(player) then table.insert(passPositions, root.Position) end
   end
  end
- task.delay(waitTime, attempt)
+ local radius = (settings.PassRadiusMeters or 50) / (Config.MetersPerStud or .28)
+ for entry in pairs(Ecology.PendingFoods) do
+  if not entry.Position then
+   entry.RetryIn -= delta
+   if entry.RetryIn <= 0 then reserveFoodDestination(entry) end
+  end
+  if entry.Position then
+   local multiplier = 1
+   for _, position in ipairs(passPositions) do
+    if (position - entry.Position).Magnitude <= radius then
+     multiplier = settings.PassMultiplier or 2
+     break -- Overlapping pass owners do not stack the local bonus.
+    end
+   end
+   entry.Remaining -= delta * globalRate * multiplier
+   if entry.Remaining <= 0 then
+    local ground = world.GroundPosition(entry.Position)
+    if ground and not reserved(ground, entry) then
+     Ecology.PendingFoods[entry] = nil
+     spawnFood(ground, entry.Biome, Ecology.RollFood(rng, entry.Biome))
+    else
+     entry.Position = nil
+     entry.RetryIn = 15
+    end
+   end
+  end
+ end
 end
 
 local function unobstructed(player, position)
@@ -145,7 +216,8 @@ local function consumeFood(player, model)
  if not entry then return false end
  model:Destroy()
  respawnFood(entry)
- callbacks.OnEat(player, entry.Spec, {Kind="Food", MutationFood=isMutation(entry.Spec), Boost=entry.Boost})
+ callbacks.OnEat(player, entry.Spec, {Kind="Food", MutationFood=isMutation(entry.Spec), Boost=entry.Boost,
+  Buff=entry.Spec.Buff})
  return true
 end
 
@@ -179,13 +251,24 @@ spawnFood = function(position, biome, spec, boosted)
  local entry = {Model=model, Spec=spec, Position=model.PrimaryPart.Position, GroundPosition=position,
   Biome=biome, Boost=boosted and 3 or 1, Claimed=false}
  Ecology.ActiveFoods[model] = entry
- prompt(model.PrimaryPart, spec.Name or "Thức ăn")
+ prompt(model.PrimaryPart, spec.Name or "Thức ăn", spec.Buff and "Uống" or "Ăn")
  -- Prompt events, like touch events, go through the same authoritative claim.
  model.PrimaryPart.EatPrompt.Triggered:Connect(function(player) consumeFood(player, model) end)
  model.PrimaryPart.Touched:Connect(function(hit)
   local player = touchingPlayer(hit)
   if player then consumeFood(player, model) end
  end)
+ if spec.Buff then
+  -- Unclaimed tonics must not gradually occupy every shared food slot.
+  local currentGeneration = generation
+  task.delay(Config.BuffFoodLifetime or 300, function()
+   if generation ~= currentGeneration then return end
+   local expired = Ecology.Claim(Ecology.ActiveFoods, model)
+   if not expired then return end
+   model:Destroy()
+   respawnFood(expired)
+  end)
+ end
  return model
 end
 
@@ -218,7 +301,8 @@ end
 
 local function canHunt(player, entry)
  return Ecology.CanEatNPC(callbacks.GetPlayerForm(player), entry.Form,
-  callbacks.GetPlayerSize and callbacks.GetPlayerSize(player), entry.Size)
+  callbacks.GetPlayerSize and callbacks.GetPlayerSize(player), entry.Size,
+  callbacks.GetHuntBonus and callbacks.GetHuntBonus(player) or 0)
 end
 
 local function consumeNPC(player, model)
@@ -293,7 +377,7 @@ end
 local function closestFood(entry)
  local nearest, distance = nil, 320
  for model, food in pairs(Ecology.ActiveFoods) do
-  if food.Biome == entry.Biome then
+  if food.Biome == entry.Biome and not food.Spec.Buff then
    local separation = horizontalDistance(entry.Root.Position, food.Position)
    if separation < distance then distance, nearest = separation, model end
   end
@@ -329,6 +413,12 @@ local function stepNPC(entry, delta, now)
   end
  end
  local food = entry.Target and Ecology.ActiveFoods[entry.Target]
+ -- Tonics are player effects. Wildlife neither seeks nor consumes them, so
+ -- scarce potions remain available and AI always keeps its configured speed.
+ if food and food.Spec.Buff then
+  entry.Target = nil
+  food = nil
+ end
  if food then
   entry.Goal = food.GroundPosition
   entry.Model:SetAttribute("Activity", "Tranh thức ăn")
@@ -354,7 +444,9 @@ local function stepNPC(entry, delta, now)
  local offset = Vector3.new(entry.Goal.X - position.X, 0, entry.Goal.Z - position.Z)
  if offset.Magnitude < .3 then entry.Model:SetAttribute("Moving", false); return end
  local direction = offset.Unit
- local distance = math.min(offset.Magnitude, (9 + entry.Form * 1.4) * delta)
+ local species = Config.Species[entry.Form]
+ local speed = species.WalkSpeed * (Config.AISpeedMultiplier or .5)
+ local distance = math.min(offset.Magnitude, speed * delta)
  local eye = position + Vector3.new(0, 2, 0)
  local obstacle = workspace:Raycast(eye, direction * (distance + 3), entry.Raycast)
  if obstacle and obstacle.Instance.CanCollide then
@@ -369,8 +461,8 @@ local function stepNPC(entry, delta, now)
   return
  end
  entry.Model:SetAttribute("Moving", true)
- entry.Model:SetAttribute("NPCWalkSpeed", 9 + entry.Form * 1.4)
- entry.Model:SetAttribute("MoveSpeed", 9 + entry.Form * 1.4)
+ entry.Model:SetAttribute("NPCWalkSpeed", speed)
+ entry.Model:SetAttribute("MoveSpeed", speed)
  local destination = CFrame.lookAt(ground, ground + direction)
  if AnimalModels.Rig and TweenService then
   -- Only the anchored root moves; Motor6Ds carry the detailed anatomy with it.
@@ -419,7 +511,7 @@ function Ecology.Stop()
  for _, entry in pairs(Ecology.ActiveNPCs) do if entry.MoveTween then entry.MoveTween:Cancel() end end
  if foodFolder then foodFolder:Destroy() end
  if npcFolder then npcFolder:Destroy() end
- Ecology.ActiveFoods, Ecology.ActiveNPCs = {}, {}
+ Ecology.ActiveFoods, Ecology.ActiveNPCs, Ecology.PendingFoods = {}, {}, {}
  foodFolder, npcFolder = nil, nil
 end
 
@@ -450,12 +542,18 @@ function Ecology.Start(worldModule, handlers)
   end
  end
  local biomes = world.Biomes or Config.Biomes
+ -- Retain every configured slot even when the initial map has temporarily
+ -- unavailable candidates. The bounded reservation worker fills them later.
+ for i = count + 1, (Config.FoodCount or 220) do
+  queueFood(biomes[1 + (i - 1) % #biomes].Id, 0)
+ end
  for i = 1, (Config.NPCCount or 24) do
   local biome = biomes[1 + (i - 1) % #biomes].Id
   local position = world.RandomPosition(biome, rng)
   if position then spawnNPC(position, biome, 1 + (i - 1) % 8) end
  end
  heartbeat = RunService.Heartbeat:Connect(function(delta)
+  stepFoodRespawns(delta)
   elapsed += delta
   if elapsed < .25 then return end
   local step = math.min(elapsed, .5)

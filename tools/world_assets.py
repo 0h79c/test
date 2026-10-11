@@ -113,33 +113,71 @@ def descriptors(seed=SEED):
         return None
 
     def tree(prefix,x,z,color,height=28,pine=False,willow=False):
-        # Cylinders point along local X, hence the 90degree Z rotation.
-        add(prefix+'Trunk',(height*.72,2.8,2.8),(x,12+height*.36,z),(109,81,63),
-            material='Wood',shape='Cylinder',rotation=(0,0,90))
+        # A few overlapping, tilted boxes make an angular organic silhouette.
+        # Only the central trunk collides: branches/crowns cannot obstruct food
+        # or catch a tall evolved animal beneath the canopy.
+        yaw=rng.uniform(0,360)
+        lean=rng.uniform(-4,4)
+        thickness=height*rng.uniform(.075,.095)
+        bark=(101,79,64) if willow else (116,85,62)
+        add(prefix+'Trunk',(thickness,height*.65,thickness*.88),
+            (x,12+height*.31,z),bark,material='Wood',rotation=(0,yaw,lean))
+        add(prefix+'RootFlare',(thickness*1.55,height*.12,thickness*1.35),
+            (x,12+height*.035,z),tuple(max(0,c-12) for c in bark),
+            material='Wood',rotation=(0,yaw+12,0))
+        heading=math.radians(yaw)
+        for side in (-1,1):
+            add(prefix+f'Branch{side}',(thickness*.63,height*.38,thickness*.63),
+                (x+side*math.cos(heading)*height*.1,12+height*.61,
+                 z-side*math.sin(heading)*height*.1),
+                tuple(min(255,c+side*5) for c in bark),material='Wood',
+                rotation=(0,yaw,-side*38),collide=False)
         if pine:
             for layer in range(3):
                 width=height*(.58-layer*.13)
-                for side in range(2):
-                    add(prefix+f'Needles{layer}_{side}',(width,height*.36,width),
-                        (x,12+height*(.48+layer*.2),z),tuple(min(255,c+layer*10) for c in color),
-                        class_name='WedgePart',rotation=(0,side*180,0),collide=False)
+                tint=tuple(min(255,c+layer*12) for c in color)
+                cy=12+height*(.58+layer*.19)
+                add(prefix+f'Needles{layer}',(width,height*.24,width*.84),
+                    (x,cy,z),tint,rotation=(layer*3-3,yaw+layer*21,layer*2-2),collide=False)
+                add(prefix+f'NeedleFacet{layer}',(width*.62,height*.22,width*.6),
+                    (x,cy+height*.135,z),tuple(min(255,c+12) for c in tint),
+                    class_name='WedgePart',rotation=(0,yaw+layer*21,0),collide=False)
         else:
-            for branch,(dx,dz,s) in enumerate(((0,0,1),(-.28,.12,.8),(.25,-.16,.85))):
-                add(prefix+f'Crown{branch}',(height*.8*s,height*.57*s,height*.72*s),
-                    (x+dx*height,12+height*(.88+branch*.035),z+dz*height),
-                    tuple(min(255,c+branch*11) for c in color),shape='Ball',collide=False)
+            clusters=((0,0,1,.91),(-.24,.13,.78,.76),(.25,-.12,.82,.80))
+            for branch,(dx,dz,s,cy) in enumerate(clusters):
+                tint=tuple(min(255,c+branch*12) for c in color)
+                rotation=(rng.uniform(-9,9),yaw+branch*24,rng.uniform(-9,9))
+                add(prefix+f'Crown{branch}',(height*.66*s,height*.43*s,height*.6*s),
+                    (x+dx*height,12+height*cy,z+dz*height),tint,
+                    rotation=rotation,collide=False)
+                if branch != 1:
+                    add(prefix+f'CrownFacet{branch}',(height*.36*s,height*.16*s,height*.36*s),
+                        (x+dx*height,12+height*(cy+.24*s),z+dz*height),
+                        tuple(min(255,c+10) for c in tint),class_name='WedgePart',
+                        rotation=(0,yaw+branch*24,0),collide=False)
             if willow:
                 for strand in range(5):
                     a=strand*math.pi*2/5
-                    add(prefix+f'Drape{strand}',(2,height*.52,3.2),
-                        (x+math.cos(a)*height*.29,12+height*.65,z+math.sin(a)*height*.29),
-                        tuple(min(255,c+18) for c in color),collide=False)
+                    length=height*rng.uniform(.37,.57)
+                    add(prefix+f'Drape{strand}',(height*.075,length,height*.1),
+                        (x+math.cos(a)*height*.29,12+height*.78-length/2,z+math.sin(a)*height*.29),
+                        tuple(min(255,c+18) for c in color),
+                        rotation=(rng.uniform(-5,5),math.degrees(a),rng.uniform(-5,5)),collide=False)
 
     def rocks(prefix,x,z,color,scale=1):
-        for n in range(3):
-            sx,sy,sz=rng.uniform(5,10)*scale,rng.uniform(4,8)*scale,rng.uniform(5,9)*scale
-            add(prefix+f'Facet{n}',(sx,sy,sz),(x+n*2.6*scale,12+sy/2-.4,z+(n%2)*2*scale),
-                tuple(min(255,c+n*12) for c in color),class_name='WedgePart',material='Rock',rotation=(0,rng.randint(0,359),0))
+        yaw=rng.uniform(0,360)
+        sx,sy,sz=rng.uniform(7,11)*scale,rng.uniform(5,9)*scale,rng.uniform(6,10)*scale
+        add(prefix+'Core',(sx,sy,sz),(x,12+sy/2-.7*scale,z),color,
+            material='Rock',rotation=(rng.uniform(-8,8),yaw,rng.uniform(-8,8)))
+        # Offset companion and exposed wedge faces avoid identical perfect cubes.
+        add(prefix+'Shoulder',(sx*.62,sy*.66,sz*.7),(x+sx*.42,12+sy*.27,z+sz*.2),
+            tuple(min(255,c+10) for c in color),material='Rock',rotation=(5,yaw+24,-7))
+        add(prefix+'Facet0',(sx*.78,sy*.45,sz*.8),(x,12+sy*.91,z),
+            tuple(min(255,c+20) for c in color),class_name='WedgePart',
+            material='Rock',rotation=(0,yaw,0))
+        add(prefix+'Facet1',(sx*.55,sy*.5,sz*.62),(x-sx*.36,12+sy*.19,z-sz*.12),
+            tuple(max(0,c-11) for c in color),class_name='WedgePart',
+            material='Rock',rotation=(0,yaw+90,0))
 
     for row in BIOMES:
         ident,label,cx,cz,ground,accent,material=row
@@ -159,7 +197,8 @@ def descriptors(seed=SEED):
             if p:
                 x,z=p
                 add(f'{ident}_Moss{n}',(rng.uniform(18,45),.16,rng.uniform(16,38)),(x,12.03,z),
-                    tuple(max(0,min(255,c+rng.randint(-10,10))) for c in accent),shape='Ball',collide=False,material=material)
+                    tuple(max(0,min(255,c+rng.randint(-10,10))) for c in accent),
+                    rotation=(0,rng.uniform(-35,35),0),collide=False,material=material)
         text('BiomeLabel_'+ident,(cx-500,32,cz-250),label,'Khám phá · tìm thức ăn · tiến hóa',tuple(min(255,c+55) for c in accent))
         trees={'forest':135,'meadow':28,'plains':21,'mountains':12,'snow':42,'river':35,'swamp':44,'desert':0,'volcano':0}[ident]
         for n in range(trees):
@@ -181,7 +220,7 @@ def descriptors(seed=SEED):
                     add(f'{ident}_Crystal{n}_{shard}',(2.6,7+shard*2.5,2.6),(x+shard*2.5,16+shard,z),
                         (113,221,237) if ident!='volcano' else (255,116,55),material='Neon',class_name='WedgePart',rotation=(0,shard*60,8),collide=False)
             elif ident=='desert':
-                add(f'desert_Cactus{n}',(12,3,3),(x,18,z),(83,137,92),shape='Cylinder',rotation=(0,0,90))
+                add(f'desert_Cactus{n}',(3,12,3),(x,18,z),(83,137,92),rotation=(0,12,0))
                 add(f'desert_CactusArm{n}',(6,2,2),(x+2,18,z),(92,147,98),collide=False)
             else:
                 palette=((248,183,204),(244,220,144),(200,172,238),(254,241,205))
@@ -222,9 +261,12 @@ def descriptors(seed=SEED):
         add(f'RiverRipple{r}',(rng.uniform(10,22),.1,1.4),(1440+rng.uniform(-48,48),10.04,-390+r*33),
             (164,235,242),material='Neon',collide=False,transparency=.55,rotation=(0,-15,0))
     for n in range(7):
-        # Cylinders useX as thickness. Width18 andspacing22 leave4studgap.
-        add(f'RiverStep{n}',(3,18,24),(1374+n*22,12.5,155),(113+n*4,129+n*3,137+n*3),
-            group='Crossings',material='Rock',shape='Cylinder',rotation=(0,0,90))
+        # Angular stepping stones retain the same flat landing top and 4stud gap.
+        add(f'RiverStep{n}',(18,3,24),(1374+n*22,12.5,155),(113+n*4,129+n*3,137+n*3),
+            group='Crossings',material='Rock')
+        add(f'RiverStepFacet{n}',(6,2,11),(1369+n*22,12,160),
+            (94+n*4,114+n*3,124+n*3),group='Crossings',material='Rock',
+            class_name='WedgePart',rotation=(0,180,0),collide=False)
     text('FreeCrossingSign',(1332,23,155),'ĐÁ BƯỚC · LỐI QUA MIỄN PHÍ','Nhảy qua đá · rơi xuống nước sẽ bị cuốn đi',width=360)
     add('PaidBridgeDeck',(184,2,28),(1440,13,-205),(125,92,70),group='Crossings',material='WoodPlanks',kind='bridge')
     for n in range(23):

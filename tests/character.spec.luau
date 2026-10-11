@@ -40,6 +40,7 @@ return function(configSource, modelSource, characterSource)
   return setmetatable({Position=vector(x,y,z)},frameMeta)
  end
  frameMeta.__mul=function(a,b) return frame(a.Position.X+b.Position.X,a.Position.Y+b.Position.Y,a.Position.Z+b.Position.Z) end
+ frameMeta.__add=function(a,b) return frame(a.Position.X+b.X,a.Position.Y+b.Y,a.Position.Z+b.Z) end
  frameMeta.__index={ToObjectSpace=function(a,b)
   return frame(b.Position.X-a.Position.X,b.Position.Y-a.Position.Y,b.Position.Z-a.Position.Z)
  end}
@@ -252,6 +253,37 @@ return function(configSource, modelSource, characterSource)
      assert(enabled>0,"Avatar hiding disabled animal effects")
     end
    end
+   for _,mutation in ipairs({"Normal","Giant","Tiny"}) do
+    local data={Form=form,Mutations={[tostring(form)]=mutation}}
+    assert(characterModule.Apply(player,data))
+    local baselineSize=character.AnimalCollider.Size
+    local baselineFloor=root.CFrame.Position.Y-character:GetAttribute("AnimalGroundHeight")
+    local baselineRoot=root.CFrame.Position.Y
+    local velocity=vector(4,2,1)
+    root.AssemblyLinearVelocity=velocity
+    data.BuffModifiers={Speed=1.5,Scale=5,HuntBonus=4}
+    assert(characterModule.Apply(player,data))
+    assert(character.AnimalVisual.Scale==config.Mutation(mutation).Scale*5,"Giant potion visual is not five times its mutation size")
+    assert(character.AnimalCollider.Size.X==baselineSize.X*5 and character.AnimalCollider.Size.Y==baselineSize.Y*5 and character.AnimalCollider.Size.Z==baselineSize.Z*5,"Giant collider retained the normal cap")
+    assert(humanoid.WalkSpeed==config.Species[form].WalkSpeed*config.Mutation(mutation).Speed*1.5,"Speed potion does not multiply the species and mutation speed")
+    local groundHeight=character:GetAttribute("AnimalGroundHeight")
+    assert(math.abs(root.CFrame.Position.Y-groundHeight-baselineFloor)<1e-8,"Growing buried the feet or launched the morph")
+    assert(math.abs(character.AnimalCollider.CFrame.Position.Y-character.AnimalCollider.Size.Y/2-baselineFloor)<1e-8,"Giant collider does not rest on the same floor")
+    local humanoidFloor=root.Size.Y/2+humanoid.HipHeight+(rig=="R6" and character["Left Leg"].Size.Y or 0)
+    assert(math.abs(humanoidFloor-groundHeight)<1e-8,"Giant floor sensing no longer matches its collider")
+    assert(root.AssemblyLinearVelocity==velocity,"Growing changed motion velocity")
+    local giantRoot=root.CFrame.Position.Y
+    assert(characterModule.Apply(player,data))
+    assert(root.CFrame.Position.Y==giantRoot,"Refreshing giant potion cumulatively raised the rig")
+    assert(character:GetAttribute("BuffGiant") and character:GetAttribute("BuffSpeed"))
+    data.BuffModifiers={Speed=1,Scale=1,HuntBonus=0}
+    assert(characterModule.Apply(player,data))
+    assert(math.abs(root.CFrame.Position.Y-baselineRoot)<1e-8,"Giant expiry left the animal floating")
+    assert(character.AnimalCollider.Size.Y==baselineSize.Y,"Giant expiry failed to restore collision size")
+    assert(humanoid.WalkSpeed==config.Species[form].WalkSpeed*config.Mutation(mutation).Speed,"Speed expired without restoring normal speed")
+    assert(not character:GetAttribute("BuffGiant") and not character:GetAttribute("BuffSpeed"))
+    assert(heartbeat:Count()==1,"Potion refresh or expiry stacked physics updates")
+   end
   end
   local accessory=makeInstance("Accessory"); accessory.Parent=character
   local handle=makeInstance("Part"); handle.Name="Handle"; handle.Parent=accessory
@@ -266,6 +298,40 @@ return function(configSource, modelSource, characterSource)
   characterModule.Cleanup(character)
   assert(heartbeat:Count()==0 and character.DescendantAdded:Count()==0,"Character cleanup leaked callbacks")
   character:Destroy()
+ end
+ -- A death replaces the control rig while the server keeps the original
+ -- potion deadline. Its first morph must account for the fresh rig's feet;
+ -- it cannot assume the character already received a normal-size morph.
+ for _,rig in ipairs({"R6","R15"}) do
+  for _,form in ipairs({1,8,15}) do
+   for _,mutation in ipairs({"Normal","Giant","Tiny"}) do
+    local player,humanoid,root=makePlayer(rig)
+    local character=player.Character
+    if rig=="R6" then character["Left Leg"].Size=vector(1,3,1) end
+    local legHeight=rig=="R6" and 3 or 0
+    local baseGroundHeight=root.Size.Y/2+(rig=="R6" and legHeight or 2)
+    local spawnRoot=root.CFrame.Position.Y
+    local spawnFloor=spawnRoot-baseGroundHeight
+    local velocity=vector(7,-2,3)
+    root.AssemblyLinearVelocity=velocity
+    local data={Form=form,Mutations={[tostring(form)]=mutation},BuffModifiers={Speed=1.5,Scale=5,HuntBonus=3}}
+    assert(characterModule.Apply(player,data))
+    local groundHeight=character:GetAttribute("AnimalGroundHeight")
+    local collider=character.AnimalCollider
+    assert(math.abs(root.CFrame.Position.Y-groundHeight-spawnFloor)<1e-8,"Active giant respawn changed the intended floor")
+    assert(math.abs(collider.CFrame.Position.Y-collider.Size.Y/2-spawnFloor)<1e-8,"Active giant respawn spawned its collider underground")
+    assert(math.abs(root.Size.Y/2+humanoid.HipHeight+legHeight-groundHeight)<1e-8,"Active giant respawn ignored the R6 leg height")
+    assert(root.AssemblyLinearVelocity==velocity,"Active giant respawn added an impulse")
+    data.BuffModifiers={Speed=1,Scale=1,HuntBonus=0}
+    assert(characterModule.Apply(player,data))
+    assert(math.abs(root.CFrame.Position.Y-spawnRoot)<1e-8,"Respawned giant did not return to its initial root height on expiry")
+    assert(math.abs(humanoid.HipHeight-(rig=="R6" and 0 or 2))<1e-8,"Respawned giant left the ordinary rig's floor probe displaced")
+    assert(root.AssemblyLinearVelocity==velocity,"Respawned giant expiry added an impulse")
+    characterModule.Cleanup(character)
+    character:Destroy()
+    assert(heartbeat:Count()==0,"Giant respawn cleanup leaked physics callbacks")
+   end
+  end
  end
  -- Viewport skins are independent of Character.Apply and can reroll without
  -- stacking geometry or permanently tinting the original authored colors.
@@ -282,5 +348,5 @@ return function(configSource, modelSource, characterSource)
   assert(base.Color==original,"Normal preview did not restore authored palette")
   preview:Destroy()
  end
- print("Character lifecycle passed: 15 species × 8 mutation changes × R6/R15; one collider, hidden avatar, clean effects, falling-only glide")
+ print("Character lifecycle passed: 15 species × 8 mutation changes × R6/R15; speed and 5x giant refresh/expiry, active-potion respawn and R6 leg height, stable floor, one collider, clean effects")
 end

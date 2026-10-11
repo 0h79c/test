@@ -107,6 +107,34 @@ class AnimalGeometryTests(unittest.TestCase):
                 if p["motion"]:
                     self.assertIsNotNone(p["pivot"],(animal.name,p["name"]))
 
+    def test_articulated_limbs_share_hip_knee_and_body_anchors(self):
+        for animal in get_models():
+            self.assertEqual(len({p["body_pivot"] for p in animal.parts}),1)
+            legs=[p for p in animal.parts if p.get("knee")]
+            if animal.name in {"Snail","Caterpillar"}:
+                continue
+            self.assertGreaterEqual(len(legs),6,animal.name)
+            groups={}
+            for p in legs:
+                key=(p["leg_side"],p["leg_front"])
+                groups.setdefault(key,[]).append(p)
+            self.assertEqual(len(groups),2 if animal.name=="Phoenix" else 4,animal.name)
+            for limb in groups.values():
+                self.assertEqual(len({p["pivot"] for p in limb}),1)
+                self.assertEqual(len({p["knee"] for p in limb}),1)
+                self.assertTrue(any(not p["leg_lower"] for p in limb))
+                self.assertTrue(any(p["leg_lower"] for p in limb))
+
+    def test_awakened_winglets_use_original_wing_hinges(self):
+        for animal in get_models():
+            base=[p for p in animal.parts if p["motion"]=="Wing"]
+            if not base:
+                continue
+            awakened=mutation_geometry(animal)["Awakened"]
+            for side in (-1,1):
+                hinges={p["pivot"] for p in base+awakened if p["motion"]=="Wing" and p["phase"]==side}
+                self.assertEqual(len(hinges),1,animal.name)
+
     def test_flat_triangles_reconstruct_the_authored_wing_vertices(self):
         for vertices in (
             ((-1,0,0),(1,0,0),(0,1,0)),
@@ -129,6 +157,29 @@ class AnimalGeometryTests(unittest.TestCase):
                     corners.append(tuple(p["position"][i]+sum(matrix[i][j]*local[j] for j in range(3)) for i in range(3)))
             for vertex in vertices:
                 self.assertTrue(any(sum((vertex[i]-corner[i])**2 for i in range(3))<1e-12 for corner in corners),vertex)
+
+    def test_cat_ears_have_pointed_front_faces_with_inset_pink(self):
+        cat=next(a for a in get_models() if a.name=="Cat")
+        for name,top,front in (("PointEar",2.99,-1.04),("EarPink",2.78,-1.168)):
+            parts=[p for p in cat.parts if p["name"]==name]
+            self.assertEqual(len(parts),4)
+            corners=[]
+            for p in parts:
+                rx,ry,rz=map(math.radians,p["rotation"])
+                cx,cy,cz=math.cos(rx),math.cos(ry),math.cos(rz)
+                sx,sy,sz=math.sin(rx),math.sin(ry),math.sin(rz)
+                matrix=((cy*cz,-cy*sz,sy),
+                        (sx*sy*cz+cx*sz,-sx*sy*sz+cx*cz,-sx*cy),
+                        (-cx*sy*cz+sx*sz,cx*sy*sz+sx*cz,cx*cy))
+                # Thickness points along Z so the large triangular face is
+                # visible from the front, rather than the rectangular edge.
+                self.assertAlmostEqual(abs(matrix[2][0]),1,places=8)
+                _,height,depth=p["size"]
+                for local in ((0,-height/2,-depth/2),(0,-height/2,depth/2),(0,height/2,depth/2)):
+                    corners.append(tuple(p["position"][i]+sum(matrix[i][j]*local[j] for j in range(3)) for i in range(3)))
+            self.assertAlmostEqual(max(c[1] for c in corners),top,places=8)
+            self.assertTrue(all(abs(c[2]-front)<1e-8 for c in corners))
+            self.assertEqual({p["pivot"] for p in parts},{(0,1.98,-1.06)})
 
     def test_all_species_have_four_distinct_mutation_appendages(self):
         required={"Giant":"TitanHorn","Tiny":"FaerieFrill",

@@ -149,6 +149,76 @@ local function mutationFruit(model, boosted)
  beacon.CastShadow = false
 end
 
+local tonicStyles = {
+ Speed={Color=Color3.fromRGB(64, 205, 255), Light=Color3.fromRGB(183, 249, 255), Label="Tăng tốc · 60 giây"},
+ Hunt={Color=Color3.fromRGB(247, 86, 66), Light=Color3.fromRGB(255, 216, 117), Label="Săn vượt 2–4 bậc · 60 giây"},
+ Giant={Color=Color3.fromRGB(170, 103, 255), Light=Color3.fromRGB(237, 190, 255), Label="Kích thước ×5 · 60 giây"},
+}
+
+local function tonic(model, buff)
+ local style = tonicStyles[buff] or tonicStyles.Speed
+ local glass = piece(model, "PotionGlass", Vector3.new(2.35, 2.55, 2.35), Vector3.new(0, 1.3, 0),
+  style.Light, Enum.PartType.Ball, Enum.Material.Glass)
+ glass.Transparency = .55
+ local liquid = piece(model, "PotionLiquid", Vector3.new(2.07, 1.7, 2.07), Vector3.new(0, 1.07, 0),
+  style.Color, Enum.PartType.Ball, Enum.Material.Neon)
+ liquid.Transparency = .13
+ local neck = piece(model, "BottleNeck", Vector3.new(.88, 1.25, .88), Vector3.new(0, 2.59, 0),
+  style.Light, Enum.PartType.Cylinder, Enum.Material.Glass, CFrame.Angles(0, 0, math.pi / 2))
+ -- Cylinders are aligned along their X axis in Roblox.
+ neck.Size = Vector3.new(1.25, .88, .88)
+ neck.Transparency = .38
+ piece(model, "GoldCollar", Vector3.new(.24, 1.09, 1.09), Vector3.new(0, 2.98, 0),
+  Color3.fromRGB(238, 190, 91), Enum.PartType.Cylinder, Enum.Material.Metal, CFrame.Angles(0, 0, math.pi / 2))
+ piece(model, "Cork", Vector3.new(.43, .69, .69), Vector3.new(0, 3.22, 0),
+  Color3.fromRGB(144, 96, 60), Enum.PartType.Cylinder, Enum.Material.Wood, CFrame.Angles(0, 0, math.pi / 2))
+ piece(model, "PotionSeal", Vector3.new(1.15, 1.12, .15), Vector3.new(0, 1.35, -1.04),
+  Color3.fromRGB(36, 40, 58), Enum.PartType.Ball)
+ if buff == "Speed" then
+  wedge(model, "LightningUpper", Vector3.new(.47, .72, .12), Vector3.new(-.07, 1.54, -1.18),
+   style.Light, CFrame.Angles(0, 0, -.38))
+  wedge(model, "LightningLower", Vector3.new(.47, .72, .12), Vector3.new(.07, 1.17, -1.18),
+   style.Light, CFrame.Angles(0, 0, math.pi - .38))
+ elseif buff == "Hunt" then
+  for _, x in ipairs({-.3, 0, .3}) do
+   wedge(model, "HunterFang", Vector3.new(.18, .8, .13), Vector3.new(x, 1.34, -1.18),
+    style.Light, CFrame.Angles(0, 0, .19))
+  end
+ else
+  piece(model, "GiantEmblem", Vector3.new(.6, .6, .16), Vector3.new(0, 1.35, -1.18),
+   style.Light, Enum.PartType.Block, Enum.Material.Neon, CFrame.Angles(0, 0, math.pi / 4))
+  for _, x in ipairs({-.46, .46}) do
+   wedge(model, "ExpansionArrow", Vector3.new(.26, .44, .15), Vector3.new(x, 1.35, -1.18),
+    style.Light, CFrame.Angles(0, 0, x < 0 and -math.pi / 2 or math.pi / 2))
+  end
+ end
+ for i = 1, 3 do
+  piece(model, "PotionBubble", Vector3.new(.15, .15, .15), Vector3.new(-.48 + i * .23, .86 + i * .26, -.54),
+   style.Light, Enum.PartType.Ball, Enum.Material.Neon)
+ end
+ local sparkle = Instance.new("Attachment")
+ sparkle.Position = Vector3.new(0, 1.1, 0)
+ sparkle.Parent = liquid
+ local particles = Instance.new("ParticleEmitter")
+ particles.Name = "TonicSparkles"
+ particles.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+ particles.Color = ColorSequence.new(style.Color, style.Light)
+ particles.Rate = 2
+ particles.Lifetime = NumberRange.new(.8, 1.4)
+ particles.Speed = NumberRange.new(.3, .8)
+ particles.SpreadAngle = Vector2.new(30, 30)
+ particles.Size = NumberSequence.new({NumberSequenceKeypoint.new(0, .17), NumberSequenceKeypoint.new(1, 0)})
+ particles.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, .2), NumberSequenceKeypoint.new(1, 1)})
+ particles.LightEmission = .8
+ particles.Parent = sparkle
+ local light = Instance.new("PointLight")
+ light.Color = style.Color
+ light.Brightness = .6
+ light.Range = 9
+ light.Shadows = false
+ light.Parent = liquid
+end
+
 function FoodModels.Create(spec, parent, boosted)
  local model = Instance.new("Model")
  model.Name = spec.Id or "Food"
@@ -160,7 +230,9 @@ function FoodModels.Create(spec, parent, boosted)
  model.PrimaryPart = root
  local id = string.lower(spec.Id or "berries")
  local isMutation = spec.Mutation == true or id == "mutation"
- if isMutation then mutationFruit(model, boosted)
+ local buffStyle = spec.Buff and tonicStyles[spec.Buff]
+ if spec.Buff then tonic(model, spec.Buff)
+ elseif isMutation then mutationFruit(model, boosted)
  elseif id == "leaf" then
   for i = 1, 3 do leaf(model, Vector3.new((i - 2) * .35, .25 + i * .1, 0), 1, (i - 2) * 55) end
  elseif id == "apple" then apple(model)
@@ -173,22 +245,25 @@ function FoodModels.Create(spec, parent, boosted)
  model:SetAttribute("FoodId", spec.Id or "berries")
  model:SetAttribute("Hunger", spec.Hunger or .5)
  model:SetAttribute("RareFood", isMutation)
+ model:SetAttribute("BuffType", spec.Buff)
+ model:SetAttribute("BuffDuration", spec.Buff and (spec.Duration or 60) or nil)
  model:SetAttribute("MutationMultiplier", boosted and 3 or 1)
  local caption = Instance.new("BillboardGui")
  caption.Name = "FoodCaption"
- caption.Size = UDim2.fromOffset(170, 46)
+ caption.Size = UDim2.fromOffset(spec.Buff and 235 or 170, 46)
  caption.StudsOffset = Vector3.new(0, 3.8, 0)
  caption.AlwaysOnTop = false
- caption.MaxDistance = isMutation and 150 or 75
+ caption.MaxDistance = isMutation and 150 or (spec.Buff and 100 or 75)
  caption.Parent = root
  local label = Instance.new("TextLabel")
  label.BackgroundTransparency = 1
  label.Size = UDim2.fromScale(1, 1)
  label.Font = Enum.Font.GothamMedium
  label.TextSize = 13
- label.TextColor3 = isMutation and Color3.fromRGB(159, 255, 231) or Color3.fromRGB(255, 245, 211)
+ label.TextColor3 = buffStyle and buffStyle.Light or (isMutation and Color3.fromRGB(159, 255, 231) or Color3.fromRGB(255, 245, 211))
  label.TextStrokeTransparency = .3
- label.Text = (spec.Name or "Thức ăn") .. (boosted and " · ×3 đột biến" or string.format(" · +%g%%", spec.Hunger or .5))
+ label.Text = (spec.Name or "Thức ăn") .. (buffStyle and ("\n" .. buffStyle.Label)
+  or (boosted and " · ×3 đột biến" or string.format(" · +%g%%", spec.Hunger or .5)))
  label.Parent = caption
  model.Parent = parent
  return model

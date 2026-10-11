@@ -10,6 +10,19 @@ Config.SpawnProtectionSeconds = 8
 Config.MutationFoodSpawnChance = 0.012
 Config.FoodCount = 220
 Config.NPCCount = 24
+Config.AISpeedMultiplier = 0.5
+Config.FoodRespawn = {
+ AdditionalPlayerRate=0.25, PerAIRate=0.10,
+ PassRadiusMeters=50, PassMultiplier=2,
+}
+Config.Buffs = {Duration=60,SpeedMultiplier=1.5,HuntMin=2,HuntMax=4,GiantScale=5}
+Config.BuffSpawnChance = 0.03
+Config.BuffFoodLifetime = 300
+Config.BuffFoods = {
+ {Id="speed_tonic",Name="Thuốc Tốc Hành",Hunger=0,Coins=0,Weight=1,Buff="Speed",Duration=60},
+ {Id="hunting_tonic",Name="Thuốc Săn Mồi",Hunger=0,Coins=0,Weight=1,Buff="Hunt",Duration=60},
+ {Id="giant_tonic",Name="Thuốc Khổng Lồ",Hunger=0,Coins=0,Weight=1,Buff="Giant",Duration=60},
+}
 Config.Commerce = {PassId=0, SupplyDropProductId=0}
 Config.Drop = {
  CheckInterval=300, ChancePerPlayer=0.05, WarningSeconds=180,

@@ -22,7 +22,7 @@ def main():
     print(f"PASS: {len(files)} Luau source files compile", flush=True)
     for spec in ("config", "rules", "events"):
         subprocess.run([args.luau, f"tests/{spec}.spec.luau"], cwd=ROOT, check=True)
-    for service in ("runtime", "character", "world", "ecology", "events", "presentation"):
+    for service in ("runtime", "character", "animation", "buffs", "world", "ecology", "events", "presentation"):
         subprocess.run([sys.executable, f"tools/test_{service}.py", "--luau", args.luau], cwd=ROOT, check=True)
 
 

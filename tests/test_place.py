@@ -115,12 +115,14 @@ class PlaceTests(unittest.TestCase):
         self.assertFalse(water['collide'])
         self.assertEqual(water['kind'],'water')
         stones=[self.record_by_name[f'RiverStep{i}'] for i in range(7)]
-        # Native cylinder thickness localX becomes worldY; localY is worldX.
+        # Box-shaped stones preserve the original 4stud gap and flat landing top.
         for left,right in zip(stones,stones[1:]):
-            gap=right['position'][0]-left['position'][0]-(left['size'][1]+right['size'][1])/2
+            gap=right['position'][0]-left['position'][0]-(left['size'][0]+right['size'][0])/2
             self.assertGreater(gap,0)
             self.assertLessEqual(gap,12*(2*40/196.2))
             self.assertEqual(left['position'][1],right['position'][1])
+            self.assertEqual(left.get('shape','Block'),'Block')
+            self.assertEqual(left['position'][1]+left['size'][1]/2,14)
         self.assertEqual(self.record_by_name['PaidBridgeDeck']['kind'],'bridge')
         tolls=[r for r in self.records if r.get('kind')=='bridge_toll']
         self.assertEqual(len(tolls),2)
@@ -130,6 +132,23 @@ class PlaceTests(unittest.TestCase):
         for r in self.records:
             if r['group']=='GroundTerrain' and r['name'].startswith('Ground_river'):
                 self.assertGreaterEqual(abs(r['position'][0]-1440)-r['size'][0]/2,66)
+
+    def test_angular_scenery_is_varied_and_does_not_block_travel(self):
+        trees=[r for r in self.records if '_Tree' in r['name']]
+        rocks=[r for r in self.records if '_Rock' in r['name']]
+        self.assertGreater(len(trees),2000)
+        self.assertGreater(len(rocks),700)
+        self.assertTrue(all(r.get('shape','Block')=='Block' for r in trees+rocks))
+        self.assertTrue(any(r.get('class_name')=='WedgePart' for r in trees))
+        self.assertTrue(any(r.get('class_name')=='WedgePart' for r in rocks))
+        trunks=[r for r in trees if r['name'].endswith('Trunk')]
+        self.assertGreater(len({tuple(r['size']) for r in trunks}),200)
+        self.assertGreater(len({tuple(r['rotation']) for r in trunks}),200)
+        for r in trees:
+            if not r['name'].endswith(('Trunk','RootFlare')):
+                self.assertIs(r.get('collide'),False,r['name'])
+        # Additional facets have a bounded scene cost under streaming.
+        self.assertLess(len(self.records),7000)
 
     def test_only_three_paid_teleport_locations(self):
         portals=[r for r in self.records if r.get('kind')=='teleport']

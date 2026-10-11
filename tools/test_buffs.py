@@ -1,0 +1,31 @@
+"""Exercise the actual timed-buff service with a deterministic server clock."""
+import argparse
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def long_string(value):
+    delimiter = "="
+    while "]" + delimiter + "]" in value:
+        delimiter += "="
+    return "[" + delimiter + "[" + value + "]" + delimiter + "]"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--luau", default="luau")
+    args = parser.parse_args()
+    spec = (ROOT / "tests/buffs.spec.luau").read_text(encoding="utf-8")
+    source = (ROOT / "src/server/Buffs.luau").read_text(encoding="utf-8")
+    runner = "local run = (function()\n" + spec + "\nend)()\nrun(" + long_string(source) + ")\n"
+    with tempfile.TemporaryDirectory(prefix="evolution-buffs-") as directory:
+        path = Path(directory) / "run.luau"
+        path.write_text(runner, encoding="utf-8")
+        subprocess.run([args.luau, str(path)], cwd=ROOT, check=True)
+
+
+if __name__ == "__main__":
+    main()
