@@ -35,7 +35,10 @@ return function(configSource, modelSource, characterSource)
   return vector(a.X*b.X,a.Y*b.Y,a.Z*b.Z)
  end
  local frameMeta = {}
- local function frame(x,y,z) return setmetatable({Position=vector(x,y,z)},frameMeta) end
+ local function frame(x,y,z)
+  if type(x)=="table" then x,y,z=x.X,x.Y,x.Z end
+  return setmetatable({Position=vector(x,y,z)},frameMeta)
+ end
  frameMeta.__mul=function(a,b) return frame(a.Position.X+b.Position.X,a.Position.Y+b.Position.Y,a.Position.Z+b.Position.Z) end
  frameMeta.__index={ToObjectSpace=function(a,b)
   return frame(b.Position.X-a.Position.X,b.Position.Y-a.Position.Y,b.Position.Z-a.Position.Z)
@@ -120,6 +123,7 @@ return function(configSource, modelSource, characterSource)
    part.CFrame=frame(p.X,p.Y,p.Z)
   end end
  end
+ function methods:GetScale() return self.Scale or 1 end
  function methods:PivotTo(target)
   local current=self.PrimaryPart and self.PrimaryPart.CFrame or frame()
   local delta=target.Position-current.Position
@@ -211,10 +215,10 @@ return function(configSource, modelSource, characterSource)
    for _,mutation in ipairs({"Normal","Giant","Tiny","Giant","Normal","Awakened","Radioactive","Normal"}) do
     assert(characterModule.Apply(player,{Form=form,Mutations={[tostring(form)]=mutation}}))
     assert(character.Scale==nil,"Morph scaled the avatar rig cumulatively")
-    assert(character.AnimalVisual.Scale==(form==5 and config.Mutation(mutation).Scale*.72 or config.Mutation(mutation).Scale))
+    assert(character.AnimalVisual.Scale==config.Mutation(mutation).Scale)
     local collider=character.AnimalCollider
     assert(collider.CanCollide and collider.CanTouch and collider.CollisionGroup=="Default")
-    assert(collider.Size.X<=3.8 and collider.Size.Y<=4.1 and collider.Size.Z<=4.4,"Collider blocks course lanes")
+    assert(collider.Size.X<=3.8 and collider.Size.Y<=4.1 and collider.Size.Z<=4.4,"Collider is too large for travel")
     assert(math.abs(collider.CFrame.Position.Y-collider.Size.Y/2-(root.CFrame.Position.Y-3))<1e-8,"Collider floor offset wrong")
     assert(torso.Transparency==1 and not torso.CanCollide and torso.CollisionGroup=="EvolutionAvatar","Default avatar still visible or collidable")
     assert(root.CollisionGroup=="Default" and not root.CanCollide,"Humanoid root cannot sense the map floor")
@@ -224,7 +228,23 @@ return function(configSource, modelSource, characterSource)
     assert(heartbeat:Count()==1,"Morph stacked per-character update connections")
     assert(character.DescendantAdded:Count()==1,"Morph stacked avatar appearance hooks")
     if mutation=="Normal" and form~=14 then assert(countDescendants(character,"ParticleEmitter")==0,"Previous aura leaked after reroll") end
-    if mutation=="Awakened" or mutation=="Radioactive" or form==14 then
+    local variant = character.AnimalVisual:GetAttribute("Mutation")
+    assert(variant==mutation,"Morph did not apply requested mutation skin")
+    local extra=0
+    local neon=0
+    for _,part in ipairs(character.AnimalVisual:GetChildren()) do
+     if part:IsA("BasePart") then
+      if part:GetAttribute("MutationGeometry") then extra+=1 end
+      if part.Material=="Neon" then neon+=1 end
+      if part.Name~="Root" then
+       assert(part.AnimalJoint and part.AnimalJoint.C1,"Animal geometry has no common hinge")
+      end
+     end
+    end
+    if mutation=="Normal" then assert(extra==0,"Mutation anatomy leaked after reroll")
+    else assert(extra>0,"Mutation did not add visual anatomy") end
+    if mutation=="Radioactive" then assert(neon>0,"Biolume crystals are missing") end
+    if mutation~="Normal" or form==14 then
      local enabled=0
      for _,obj in ipairs(character:GetDescendants()) do
       if obj:IsA("ParticleEmitter") and obj.Enabled then enabled+=1 end
@@ -246,6 +266,21 @@ return function(configSource, modelSource, characterSource)
   characterModule.Cleanup(character)
   assert(heartbeat:Count()==0 and character.DescendantAdded:Count()==0,"Character cleanup leaked callbacks")
   character:Destroy()
+ end
+ -- Viewport skins are independent of Character.Apply and can reroll without
+ -- stacking geometry or permanently tinting the original authored colors.
+ for form=1,15 do
+  local preview=models.Create(form)
+  local base=preview:GetChildren()[2]
+  local original=base.Color
+  models.ApplySkin(preview,form,"Awakened")
+  local awakenedCount=#preview:GetChildren()
+  models.ApplySkin(preview,form,"Awakened")
+  assert(#preview:GetChildren()==awakenedCount,"Preview reroll stacked appendages")
+  models.ApplySkin(preview,form,"Normal")
+  assert(#preview:GetChildren()==#models.Definitions[form].Parts+1,"Normal preview retained mutation parts")
+  assert(base.Color==original,"Normal preview did not restore authored palette")
+  preview:Destroy()
  end
  print("Character lifecycle passed: 15 species × 8 mutation changes × R6/R15; one collider, hidden avatar, clean effects, falling-only glide")
 end

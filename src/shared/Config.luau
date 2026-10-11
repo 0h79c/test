@@ -1,7 +1,36 @@
 local Config = {}
-Config.CheckpointsPerEvolution = 10
-Config.CheckpointReward = 100
-Config.RerollCost = 500
+Config.MetersPerStud = 0.28
+Config.DeathRespawnMeters = 200
+Config.DeathRespawnStuds = Config.DeathRespawnMeters / Config.MetersPerStud
+Config.NearRespawnCooldown = 180
+Config.NearRespawnOfferSeconds = 120
+Config.AttackRange = 9
+Config.AttackCooldown = 1.25
+Config.SpawnProtectionSeconds = 8
+Config.MutationFoodSpawnChance = 0.012
+Config.FoodCount = 220
+Config.NPCCount = 24
+Config.Commerce = {PassId=0, SupplyDropProductId=0}
+Config.Drop = {
+ CheckInterval=300, ChancePerPlayer=0.05, WarningSeconds=180,
+ CoinsMin=800, CoinsMax=1800, FullnessMin=20, FullnessMax=50,
+ DespawnSeconds=600, MaxPending=3,
+}
+Config.Foods = {
+ {Id="berry",Name="Quả mọng",Hunger=0.5,Coins=4,Weight=22},
+ {Id="leaf",Name="Lá non",Hunger=1,Coins=6,Weight=20},
+ {Id="apple",Name="Táo",Hunger=2,Coins=10,Weight=18},
+ {Id="mushroom",Name="Nấm",Hunger=3,Coins=14,Weight=17},
+ {Id="fish",Name="Cá",Hunger=5,Coins=22,Weight=11},
+ {Id="meat",Name="Thịt",Hunger=7,Coins=30,Weight=8},
+ {Id="fruit",Name="Trái cây quý",Hunger=10,Coins=45,Weight=4},
+}
+-- The remaining 75% is Normal. A supply drop triples each non-Normal
+-- probability exactly (8/7/7/3 -> 24/21/21/9), leaving 25% Normal.
+Config.RareFoodMutations = {
+ {Name="Normal",Weight=75}, {Name="Giant",Weight=8}, {Name="Tiny",Weight=7},
+ {Name="Radioactive",Weight=7}, {Name="Awakened",Weight=3},
+}
 Config.Species = {}
 local rows = {
  {"Snail", "Ốc Sên",12,40}, {"Caterpillar","Sâu Bướm",14,45},
@@ -22,8 +51,9 @@ Config.Mutations = {
  {Name="Radioactive", Label="Phát quang", Weight=10, Scale=1, Speed=1.15, Jump=1.15},
  {Name="Awakened", Label="Thức tỉnh", Weight=5, Scale=1, Speed=1.3, Jump=1.3},
 }
-function Config.Unlocked(checkpoint)
- return math.clamp(1 + math.floor(checkpoint / Config.CheckpointsPerEvolution), 1, #Config.Species)
+function Config.Unlocked(legacyCheckpoint)
+ -- Only used to migrate saves from the old obby version.
+ return math.clamp(1 + math.floor(legacyCheckpoint / 10), 1, #Config.Species)
 end
 function Config.Roll(rng)
  local roll = rng:NextInteger(1,100)

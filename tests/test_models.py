@@ -6,7 +6,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
-from model_assets import Animal, build_models, get_models
+from model_assets import Animal, build_models, get_models, mutation_geometry
 
 
 class AnimalGeometryTests(unittest.TestCase):
@@ -91,6 +91,59 @@ class AnimalGeometryTests(unittest.TestCase):
             if name=="Root":
                 self.assertEqual(position,(0,0,0))
                 self.assertEqual(options["transparency"],1)
+
+    def test_shared_hinges_keep_connected_wings_and_tails_together(self):
+        for animal in get_models():
+            tails=[p for p in animal.parts if p["motion"]=="Tail"]
+            if tails:
+                self.assertEqual(len({p["pivot"] for p in tails}),1,animal.name)
+            wings=[p for p in animal.parts if p["motion"]=="Wing"]
+            for side in (-1,1):
+                same_side=[p for p in wings if p["phase"]==side]
+                if same_side:
+                    self.assertEqual(len({p["pivot"] for p in same_side}),1,animal.name)
+            for p in animal.parts:
+                self.assertIn(p["skin"],("Body","Light","Accent","Dark","Detail"))
+                if p["motion"]:
+                    self.assertIsNotNone(p["pivot"],(animal.name,p["name"]))
+
+    def test_flat_triangles_reconstruct_the_authored_wing_vertices(self):
+        for vertices in (
+            ((-1,0,0),(1,0,0),(0,1,0)),
+            ((1,2,3),(4,3,2),(2,2,5)),
+            ((-1,2,.2),(-3.5,3.2,.4),(-3.3,3.08,1.91)),
+        ):
+            animal=Animal("Membrane",(1,1,1))
+            animal.triangle("Wing",vertices,(100,180,200))
+            self.assertEqual(len(animal.parts),2)
+            corners=[]
+            for p in animal.parts:
+                rx,ry,rz=map(math.radians,p["rotation"])
+                cx,cy,cz=math.cos(rx),math.cos(ry),math.cos(rz)
+                sx,sy,sz=math.sin(rx),math.sin(ry),math.sin(rz)
+                matrix=((cy*cz,-cy*sz,sy),
+                        (sx*sy*cz+cx*sz,-sx*sy*sz+cx*cz,-sx*cy),
+                        (-cx*sy*cz+sx*sz,cx*sy*sz+sx*cz,cx*cy))
+                _,height,depth=p["size"]
+                for local in ((0,-height/2,-depth/2),(0,-height/2,depth/2),(0,height/2,depth/2)):
+                    corners.append(tuple(p["position"][i]+sum(matrix[i][j]*local[j] for j in range(3)) for i in range(3)))
+            for vertex in vertices:
+                self.assertTrue(any(sum((vertex[i]-corner[i])**2 for i in range(3))<1e-12 for corner in corners),vertex)
+
+    def test_all_species_have_four_distinct_mutation_appendages(self):
+        required={"Giant":"TitanHorn","Tiny":"FaerieFrill",
+                  "Radioactive":"BiolumeCrystal","Awakened":"CelestialCrown"}
+        for animal in get_models():
+            variants=mutation_geometry(animal)
+            self.assertEqual(set(variants),set(required))
+            for name,parts in variants.items():
+                self.assertIn(required[name],{p["name"] for p in parts})
+                for p in parts:
+                    self.assertEqual(p["skin"],"Mutation")
+                    self.assertTrue(all(math.isfinite(v) and v>0 for v in p["size"]))
+                    self.assertTrue(all(math.isfinite(v) for v in p["position"]))
+                if name=="Awakened":
+                    self.assertEqual(len([p for p in parts if p["name"]=="CelestialHalo"]),18)
 
 
 if __name__=="__main__":

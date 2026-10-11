@@ -1,11 +1,15 @@
--- Run against the real Main.server source supplied by tools/test_runtime.py.
--- Roblox services are mocked; this catches startup and character lifecycle
--- regressions without pretending to replace physics tests in Studio.
+-- Exercise the real Main.server source with deterministic service boundaries.
+-- This validates lifecycle and economy decisions, not Studio rendering/physics.
 local Config = require("../src/shared/Config")
+local Rules = require("../src/shared/Rules")
 
 return function(serverSource)
+ local serverCount = 0
  local function createHarness(options)
   options = options or {}
+  serverCount += 1
+  local serverId = options.serverId or serverCount
+  local timeBase = options.timeBase or 10000
   local now, queue, warnings = 0, {}, {}
   local scheduler = {}
   function scheduler.spawn(callback, ...)
@@ -22,17 +26,13 @@ return function(serverSource)
    return thread
   end
   scheduler.defer = scheduler.spawn
-  function scheduler.wait(seconds)
-   return coroutine.yield(seconds or 0.03)
-  end
+  function scheduler.wait(seconds) return coroutine.yield(seconds or 0.03) end
   local function advance(seconds)
    local untilTime, iterations = now + (seconds or 0), 0
    while true do
     local index, earliest
     for i, entry in ipairs(queue) do
-     if entry.At <= untilTime and (not earliest or entry.At < earliest) then
-      index, earliest = i, entry.At
-     end
+     if entry.At <= untilTime and (not earliest or entry.At < earliest) then index, earliest = i, entry.At end
     end
     if not index then break end
     local entry = table.remove(queue, index)
@@ -43,7 +43,7 @@ return function(serverSource)
      table.insert(queue, {At=now + (delay or 0.03), Thread=entry.Thread})
     end
     iterations += 1
-    assert(iterations < 1000, "Server did not yield useful work")
+    assert(iterations < 5000, "Server did not yield useful work")
    end
    now = untilTime
   end
@@ -52,7 +52,9 @@ return function(serverSource)
    return {
     Connect=function(_, callback)
      table.insert(handlers, callback)
-     return {Disconnect=function() table.remove(handlers, table.find(handlers, callback)) end}
+     return {Disconnect=function()
+      local index=table.find(handlers,callback); if index then table.remove(handlers,index) end
+     end}
     end,
     Fire=function(_, ...)
      for _, callback in ipairs(table.clone(handlers)) do scheduler.spawn(callback, ...) end
@@ -60,299 +62,491 @@ return function(serverSource)
    }
   end
   local vectorMeta = {}
-  local function vector(x, y, z)
-   return setmetatable({X=x or 0, Y=y or 0, Z=z or 0}, vectorMeta)
-  end
-  vectorMeta.__index=function(v, key)
-   if key == "Magnitude" then return math.sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z) end
+  local function vector(x, y, z) return setmetatable({X=x or 0,Y=y or 0,Z=z or 0},vectorMeta) end
+  vectorMeta.__index=function(v,key)
+   if key=="Magnitude" then return math.sqrt(v.X*v.X+v.Y*v.Y+v.Z*v.Z) end
+   if key=="Unit" then local length=math.sqrt(v.X*v.X+v.Y*v.Y+v.Z*v.Z); return vector(v.X/length,v.Y/length,v.Z/length) end
   end
   vectorMeta.__add=function(a,b) return vector(a.X+b.X,a.Y+b.Y,a.Z+b.Z) end
   vectorMeta.__sub=function(a,b) return vector(a.X-b.X,a.Y-b.Y,a.Z-b.Z) end
   vectorMeta.__mul=function(a,b)
-   if type(a) == "number" then a,b=b,a end
+   if type(a)=="number" then a,b=b,a end
    return vector(a.X*b,a.Y*b,a.Z*b)
+  end
+  vectorMeta.__div=function(a,b) return vector(a.X/b,a.Y/b,a.Z/b) end
+  local function cframe(x,y,z)
+   return {Position=if type(x)=="table" then x else vector(x,y,z),LookVector=vector(0,0,-1)}
   end
   local instanceMethods, instanceMeta = {}, {}
   local workspaceMock
-  instanceMeta.__index=function(object, key)
+  instanceMeta.__index=function(object,key)
    if instanceMethods[key] then return instanceMethods[key] end
-   if object._properties[key] ~= nil then return object._properties[key] end
-   for _, child in ipairs(object._children) do
-    if child.Name == key then return child end
-   end
+   if object._properties[key]~=nil then return object._properties[key] end
+   for _,child in ipairs(object._children) do if child.Name==key then return child end end
   end
-  instanceMeta.__newindex=function(object, key, value)
-   if key == "Parent" then
-    local old = object._properties.Parent
-    if old then
-     local index=table.find(old._children,object)
-     if index then table.remove(old._children,index) end
+  instanceMeta.__newindex=function(object,key,value)
+   if key=="Parent" then
+    local old=object._properties.Parent
+    if old then local index=table.find(old._children,object);if index then table.remove(old._children,index) end end
+    object._properties.Parent=value
+    if value then
+     table.insert(value._children,object)
+     local ancestor=value
+     while ancestor do ancestor.DescendantAdded:Fire(object);ancestor=ancestor.Parent end
     end
-    if value then table.insert(value._children,object) end
+    if object.AncestryChanged then object.AncestryChanged:Fire(object,value) end
+    return
    end
-   object._properties[key] = value
+   object._properties[key]=value
   end
   local function instance(className)
-   local object = setmetatable({_properties={ClassName=className,Name=className},_children={},_attributes={}}, instanceMeta)
-   if className == "RemoteEvent" then
-    object.OnServerEvent=signal()
-    object.Events={}
-   elseif className == "Humanoid" then
-    object.Health=100
-    object.Died=signal()
+   local object=setmetatable({_properties={ClassName=className,Name=className},_children={},_attributes={}},instanceMeta)
+   object.AncestryChanged=signal();object.DescendantAdded=signal()
+   if className=="RemoteEvent" then object.OnServerEvent=signal();object.Events={}
+   elseif className=="Humanoid" then object.Health=100;object.Died=signal()
+   elseif className=="Part" or className=="SpawnLocation" then
+    object.Touched=signal();object.Size=vector(2,2,2);object.Position=vector();object.AssemblyMass=10
+    object.AssemblyLinearVelocity=vector();object.AssemblyAngularVelocity=vector();object.Impulses={}
    end
    return object
   end
   function instanceMethods:SetAttribute(key,value) self._attributes[key]=value end
   function instanceMethods:GetAttribute(key) return self._attributes[key] end
   function instanceMethods:FindFirstChild(name)
-   for _,child in ipairs(self._children) do if child.Name == name then return child end end
+   for _,child in ipairs(self._children) do if child.Name==name then return child end end
   end
   function instanceMethods:WaitForChild(name)
-   local child=self:FindFirstChild(name)
-   assert(child,"Mock child missing: "..name)
-   return child
+   local child=self:FindFirstChild(name);assert(child,"Mock child missing: "..name);return child
   end
   function instanceMethods:FindFirstChildOfClass(className)
-   for _,child in ipairs(self._children) do if child.ClassName == className then return child end end
+   for _,child in ipairs(self._children) do if child:IsA(className) then return child end end
+  end
+  function instanceMethods:FindFirstAncestorOfClass(className)
+   local parent=self.Parent
+   while parent do if parent:IsA(className) then return parent end;parent=parent.Parent end
   end
   function instanceMethods:GetChildren() return table.clone(self._children) end
-  function instanceMethods:IsA(className) return self.ClassName == className end
-  function instanceMethods:FireClient(player,action,data)
-   table.insert(self.Events,{Player=player,Action=action,Data=data})
+  function instanceMethods:IsA(className)
+   return self.ClassName==className or (className=="BasePart" and (self.ClassName=="Part" or self.ClassName=="SpawnLocation"))
   end
+  function instanceMethods:FireClient(player,action,data) table.insert(self.Events,{Player=player,Action=action,Data=data}) end
+  function instanceMethods:FireAllClients(action,data) table.insert(self.Events,{Action=action,Data=data}) end
   function instanceMethods:PivotTo(cf)
    self.LastPivot=cf
    local root=self:FindFirstChild("HumanoidRootPart")
-   if root then root.Position=cf.Position; root.CFrame=cf end
+   if root then root.Position=cf.Position;root.CFrame=cf end
   end
   function instanceMethods:Kick(message) self.Kicked=message end
+  function instanceMethods:SetNetworkOwner(owner) self.NetworkOwner=owner end
+  function instanceMethods:ApplyImpulse(impulse)
+   table.insert(self.Impulses,impulse);self.AssemblyLinearVelocity+=impulse/self.AssemblyMass
+  end
+  function instanceMethods:ChangeState(state) self.LastState=state end
   function instanceMethods:LoadCharacterAsync()
    self.LoadCount=(self.LoadCount or 0)+1
-   local character=instance("Model"); character.Name=self.Name
-   local root=instance("Part"); root.Name="HumanoidRootPart"; root.Position=vector(); root.Parent=character
-   root.CFrame={Position=root.Position}
-   local humanoid=instance("Humanoid"); humanoid.Parent=character
-   character.Parent=workspaceMock
-   self.Character=character
-   self.CharacterAdded:Fire(character)
+   if self.Character then self.Character.Parent=nil end
+   local character=instance("Model");character.Name=self.Name
+   local root=instance("Part");root.Name="HumanoidRootPart";root.CFrame=cframe(root.Position);root.Parent=character
+   local humanoid=instance("Humanoid");humanoid.Parent=character
+   character.Parent=workspaceMock;self.Character=character;self.CharacterAdded:Fire(character)
    return character
   end
   instanceMethods.LoadCharacter=instanceMethods.LoadCharacterAsync
 
   local replicated=instance("Folder")
-  local shared=instance("Folder"); shared.Name="Shared"; shared.Parent=replicated
-  local configModule=instance("ModuleScript"); configModule.Name="Config"; configModule.Parent=shared
+  local shared=instance("Folder");shared.Name="Shared";shared.Parent=replicated
   local scriptParent=instance("Folder")
-  local characterModule=instance("ModuleScript"); characterModule.Name="Character"; characterModule.Parent=scriptParent
-  local worldModule=instance("ModuleScript"); worldModule.Name="World"; worldModule.Parent=scriptParent
-  local serverScript=instance("Script"); serverScript.Parent=scriptParent
-  local players=instance("Players")
-  players.RespawnTime=5
-  players.PlayerAdded=signal(); players.PlayerRemoving=signal()
+  local modules={}
+  for _,name in ipairs({"Config","Rules","Character","World","Ecology","Events","Commerce"}) do
+   local module=instance("ModuleScript");module.Name=name
+   module.Parent=if name=="Config" or name=="Rules" then shared else scriptParent
+   modules[name]=module
+  end
+  local serverScript=instance("Script");serverScript.Parent=scriptParent
+  local players=instance("Players");players.RespawnTime=5
+  players.PlayerAdded=signal();players.PlayerRemoving=signal()
   local playerList={}
   function players:GetPlayers() return table.clone(playerList) end
   function players:GetPlayerFromCharacter(character)
-   for _,p in ipairs(playerList) do if p.Character == character then return p end end
+   for _,p in ipairs(playerList) do if p.Character==character then return p end end
+  end
+  function players:GetPlayerByUserId(id)
+   for _,p in ipairs(playerList) do if p.UserId==id and p.Parent then return p end end
   end
   local function makePlayer(id)
-   local p=instance("Player"); p.UserId=id; p.Name="Player"..id
-   p.CharacterAdded=signal(); p.CharacterAppearanceLoaded=signal(); p.Parent=players
-   table.insert(playerList,p)
-   return p
+   local p=instance("Player");p.UserId=id;p.Name="Player"..id;p.DisplayName=p.Name
+   p.CharacterAdded=signal();p.CharacterAppearanceLoaded=signal();p.Parent=players
+   table.insert(playerList,p);return p
   end
-  workspaceMock=instance("Workspace")
-  workspaceMock.Gravity=196.2
-  local world={Checkpoints={},CoinPositions={},BuildCount=0}
-  for i=0,140 do world.Checkpoints[i]={Position=vector(i*24,15,0)} end
-  world.SpawnLocation=instance("SpawnLocation")
-  function world.Build(onCheckpoint,onCoin,onStation)
-   world.BuildCount+=1
-   world.OnCheckpoint=onCheckpoint; world.OnCoin=onCoin; world.OnStation=onStation
-   return instance("Folder")
+  workspaceMock=instance("Workspace");workspaceMock.Gravity=196.2
+  function workspaceMock:GetServerTimeNow() return timeBase+now end
+  function workspaceMock:Raycast() return if options.blockAttack then {} else nil end
+  local world={StartSpawn=cframe(0,16,0),BuildCount=0,RandomCalls={},Teleports={}}
+  function world.Build(callbacks) world.BuildCount+=1;world.Callbacks=callbacks;return instance("Folder") end
+  function world.PositionBiome(position) return if position.X>=2000 then "forest" else "meadow" end
+  function world.IsSafe(position) return position and math.abs(position.X)<100000 and math.abs(position.Z)<100000 end
+  function world.GroundPosition(position)
+   return if options.unsafeGround then nil else vector(position.X,10,position.Z)
   end
+  function world.NearestSafeSpawn(biome,origin)
+   world.NearestCall={Biome=biome,Origin=origin}
+   return cframe(origin.X+30,16,origin.Z)
+  end
+  function world.RandomSpawn(biome,origin,minimum)
+   table.insert(world.RandomCalls,{Biome=biome,Origin=origin,Minimum=minimum})
+   return cframe(origin.X+minimum+30,16,origin.Z)
+  end
+  function world.UseTeleport(player,id) world.TeleportRequest={Player=player,Id=id} end
   local applied={}
-  local character={Apply=function(p,data)
-   assert(p.Character,"Morph attempted before character existed")
-   assert(p.Character:FindFirstChild("HumanoidRootPart"),"Morph attempted without root")
-   table.insert(applied,{Player=p,Form=data.Form,Checkpoint=data.Checkpoint})
+  local character={Initialize=function() end,Apply=function(p,data)
+   assert(p.Character and p.Character:FindFirstChild("HumanoidRootPart"),"Morph attempted before safe character existed")
+   table.insert(applied,{Player=p,Form=data.Form,Unlocked=data.Unlocked})
    p.Character:SetAttribute("Form",data.Form)
+   local collider=p.Character:FindFirstChild("AnimalCollider")
+   if not collider then collider=instance("Part");collider.Name="AnimalCollider";collider.Parent=p.Character end
+   collider.Size=vector(0.5+data.Form*0.25,1,0.5+data.Form*0.25)
   end}
-  local stored=options.profile
+  local commerce={PassPrompts={},DropPrompts={}}
+  function commerce.Start(callbacks) commerce.Callbacks=callbacks end
+  function commerce.HasPass(p) return options.pass==true or (options.passes and options.passes[p.UserId]==true) or false end
+  function commerce.GetAvailability() return {PassAvailable=false,DropAvailable=true} end
+  function commerce.OnPlayerAdded() end
+  function commerce.PromptPass(p) table.insert(commerce.PassPrompts,p) end
+  function commerce.PromptSupplyDrop(p) table.insert(commerce.DropPrompts,p) end
+  local events={Requests={},RequestCounts={}}
+  function events.Start(receivedWorld,callbacks) assert(receivedWorld==world);events.Callbacks=callbacks end
+  function events.GetActiveDrops() return {} end
+  function events.RequestPurchasedDrop(p,id)
+   if options.rejectDropQueue then return false end
+   table.insert(events.Requests,{Player=p,Id=id});events.RequestCounts[id]=(events.RequestCounts[id] or 0)+1;return true
+  end
+  local ecology={}
+  function ecology.Start(receivedWorld,callbacks) assert(receivedWorld==world);ecology.Callbacks=callbacks end
+  function ecology.TryEat(p)
+   if ecology.Pending then ecology.Callbacks.OnEat(p,ecology.Pending.Spec,ecology.Pending.Source);ecology.Pending=nil end
+  end
+  local storedByKey={}
+  local initialProfile=options.profile
   local updates,acquisitions=0,0
-  local store={UpdateAsync=function(_,_,callback)
-   updates+=1
-   local call=updates
-   if options.loadDelay and call == 1 then scheduler.wait(options.loadDelay) end
+  local function clone(value)
+   if type(value)~="table" then return value end
+   local result={};for key,item in pairs(value) do result[key]=clone(item) end;return result
+  end
+  local store={UpdateAsync=function(_,key,callback)
+   updates+=1;local call=updates
+   if storedByKey[key]==nil then
+    if options.profiles then storedByKey[key]=clone(options.profiles[tonumber(string.sub(key,8))])
+    elseif initialProfile then storedByKey[key]=clone(initialProfile);initialProfile=nil end
+   end
+   if options.loadDelay and call==1 then scheduler.wait(options.loadDelay) end
    if options.updateFailure then error("API Services unavailable") end
-   local result=callback(stored)
-   if result ~= nil then stored=result end
-   if options.returnDelay and call == 1 then scheduler.wait(options.returnDelay) end
-   return result
+   local result=callback(clone(storedByKey[key]))
+   if result~=nil then storedByKey[key]=clone(result) end
+   if options.returnDelay and call==1 then scheduler.wait(options.returnDelay) end
+   return clone(result)
   end}
   local dataStore={GetDataStore=function()
    acquisitions+=1
    if options.acquireFailure then error("You must publish this place to access DataStore") end
    return store
   end}
-  local gameMock={ReplicatedStorage=replicated,Players=players,
-   GameId=options.gameId or 0,PlaceId=options.gameId or 0,JobId="test-job"}
+  local gameMock={ReplicatedStorage=replicated,Players=players,GameId=options.gameId or 0,PlaceId=options.gameId or 0,JobId="test-job"}
   local guidCount=0
   function gameMock:GetService(name)
-   if name == "Players" then return players
-   elseif name == "DataStoreService" then return dataStore
-   elseif name == "HttpService" then return {GenerateGUID=function()
-    guidCount+=1; return "runtime-test-guid-"..guidCount
-   end}
-   elseif name == "RunService" then return {IsStudio=function() return options.studio ~= false end}
-   elseif name == "ReplicatedStorage" then return replicated
-   elseif name == "Workspace" then return workspaceMock end
+   if name=="Players" then return players
+   elseif name=="DataStoreService" then return dataStore
+   elseif name=="HttpService" then return {GenerateGUID=function() guidCount+=1;return "runtime-server-"..serverId.."-guid-"..guidCount end}
+   elseif name=="RunService" then return {IsStudio=function() return options.studio~=false end}
+   elseif name=="ReplicatedStorage" then return replicated
+   elseif name=="Workspace" then return workspaceMock end
    error("Unhandled service: "..name)
   end
   function gameMock:BindToClose(callback) self.OnClose=callback end
   local environment=setmetatable({
    game=gameMock,workspace=workspaceMock,script=serverScript,task=scheduler,
-   Instance={new=instance},Vector3={new=vector,zero=vector()},
-   CFrame={new=function(x,y,z) return {Position=vector(x,y,z)} end},
-   Random={new=function() return {NextInteger=function(_,minimum) return minimum end} end},
+   Instance={new=instance},Vector3={new=vector,zero=vector()},CFrame={new=cframe},
+   RaycastParams={new=function() return {} end},
+   Enum={RaycastFilterType={Exclude="Exclude"},HumanoidStateType={Freefall="Freefall"}},
+   Random={new=function() return {NextInteger=function(_,minimum) return options.roll or minimum end} end},
    warn=function(...) table.insert(warnings,table.pack(...)) end,
-   os={time=function() return 10000+math.floor(now) end,clock=function() return now end},
+   os={time=function() return timeBase+math.floor(now) end,clock=function() return now end},
    require=function(module)
-    if module == configModule then return Config
-    elseif module == characterModule then return character
-    elseif module == worldModule then return world end
+    if module==modules.Config then return Config elseif module==modules.Rules then return Rules
+    elseif module==modules.Character then return character elseif module==modules.World then return world
+    elseif module==modules.Ecology then return ecology elseif module==modules.Events then return events
+    elseif module==modules.Commerce then return commerce end
     error("Unexpected module require")
    end,
   },{__index=getfenv()})
   local before=options.existing and makePlayer(101) or nil
-  local chunk,compileError=loadstring(serverSource,"Main.server.luau")
-  assert(chunk,compileError)
-  setfenv(chunk,environment)
-  scheduler.spawn(chunk)
-  advance(0)
-  local h={World=world,Applied=applied,Warnings=warnings,Players=players,Existing=before,Advance=advance}
-  function h:AddPlayer(id)
-   local p=makePlayer(id); players.PlayerAdded:Fire(p); advance(0); return p
-  end
+  local chunk,compileError=loadstring(serverSource,"Main.server.luau");assert(chunk,compileError)
+  setfenv(chunk,environment);scheduler.spawn(chunk);advance(0)
+  local h={World=world,Applied=applied,Warnings=warnings,Players=players,Existing=before,Advance=advance,
+   Commerce=commerce,Events=events,Ecology=ecology,Vector=vector,Instance=instance,Workspace=workspaceMock}
+  function h:AddPlayer(id) local p=makePlayer(id);players.PlayerAdded:Fire(p);advance(0);return p end
   function h:Remote() return replicated:FindFirstChild("EvolutionEvent") end
   function h:LatestState(p)
-   for i=#self:Remote().Events,1,-1 do
-    local event=self:Remote().Events[i]
-    if event.Player == p and event.Action == "State" then return event.Data end
+   for i=#self:Remote().Events,1,-1 do local event=self:Remote().Events[i]
+    if event.Player==p and event.Action=="State" then return event.Data end
    end
   end
+  function h:Send(p,action,value) advance(0.2);self:Remote().OnServerEvent:Fire(p,action,value);advance(0) end
+  function h:Eat(p,spec,source) ecology.Callbacks.OnEat(p,spec,source);advance(0) end
+  function h:Roll(value) options.roll=value end
   function h:Acquisitions() return acquisitions end
   function h:Updates() return updates end
-  function h:Stored() return stored end
+  function h:UnixTime() return timeBase+math.floor(now) end
+  function h:Stored(id)
+   if id then return storedByKey["player_"..id] end
+   for _,value in pairs(storedByKey) do return value end
+  end
   function h:FailUpdates(value) options.updateFailure=value end
+  function h:RejectDrops(value) options.rejectDropQueue=value end
+  function h:BlockAttack(value) options.blockAttack=value end
   function h:RemovePlayer(p)
-   p.Parent=nil
-   players.PlayerRemoving:Fire(p)
-   advance(0)
+   p.Parent=nil;local index=table.find(playerList,p);if index then table.remove(playerList,index) end
+   players.PlayerRemoving:Fire(p);advance(0)
   end
-  function h:Close()
-   scheduler.spawn(gameMock.OnClose)
-   advance(0)
+  function h:Close() scheduler.spawn(gameMock.OnClose);advance(0) end
+  function h:Kill(p)
+   local humanoid=p.Character:FindFirstChildOfClass("Humanoid");humanoid.Health=0;humanoid.Died:Fire();advance(0)
   end
-  function h:Respawn(p)
-   local humanoid=p.Character:FindFirstChildOfClass("Humanoid")
-   humanoid.Health=0; humanoid.Died:Fire(); advance(6)
+  function h:Respawn(p) self:Kill(p);advance(6) end
+  function h:Grant(p,id)
+   local result;scheduler.spawn(function() result=commerce.Callbacks.GrantDropCredit(p,id) end);advance(0);return result
   end
+  function h:Flush(p) commerce.Callbacks.OnDropCreditGranted(p);advance(0) end
+  function h:Delivered(p,id)
+   local result;scheduler.spawn(function() result=events.Callbacks.OnPurchasedDropDelivered(p,id) end);advance(0);return result
+  end
+  function h:Touch(a,b) a.Character.AnimalCollider.Touched:Fire(b.Character.AnimalCollider);advance(0) end
   return h
  end
 
- local function assertReady(h,p,checkpoint,form)
-  assert(h.World.BuildCount == 1,"Server must build world exactly once")
+ local function assertReady(h,p,unlocked,form)
+  assert(h.World.BuildCount==1,"Server must build world exactly once")
+  assert(h.Workspace:GetAttribute("EvolutionStatus")=="Ready","Server never marked world ready")
   assert(p.Character,"Player never received a character")
-  assert(p.Character:GetAttribute("Form") == form,"Player kept the default avatar")
-  assert(p.Character.LastPivot == h.World.Checkpoints[checkpoint],"Player spawned away from a safe checkpoint")
-  assert(p.leaderstats.Checkpoint.Value == checkpoint,"Checkpoint state did not synchronize")
+  assert(p.Character:GetAttribute("Form")==form,"Player kept the default avatar")
+  assert(p.Character.LastPivot,"Player was never placed safely")
+  assert(p.leaderstats.Evolution.Value==unlocked,"Unlocked species did not synchronize")
   assert(h:LatestState(p),"Client never received initial state")
  end
 
  local unpublished=createHarness({acquireFailure=true})
  local player=unpublished:AddPlayer(1)
- unpublished.Advance(1)
- assertReady(unpublished,player,0,1)
- assert(unpublished:Acquisitions() == 0,"Unpublished Studio must use a temporary profile without touching DataStore")
- assert(unpublished:LatestState(player).ReadOnly,"Unpublished session must report unsaved progress")
+ assertReady(unpublished,player,1,1)
+ assert(unpublished:Acquisitions()==0,"Unpublished Studio must not touch DataStore")
+ assert(unpublished:LatestState(player).ReadOnly,"Temporary mode must report unsaved progress")
+ assert(not unpublished.Commerce.Callbacks.CanPurchaseDrop(player),"Paid drops must be unavailable without durable storage")
+ assert(not unpublished:Grant(player,"cannot-persist"))
 
  local acquisitionFailure=createHarness({studio=false,gameId=1,acquireFailure=true})
  local fallback=acquisitionFailure:AddPlayer(2)
- acquisitionFailure.Advance(1)
- assertReady(acquisitionFailure,fallback,0,1)
- assert(acquisitionFailure:Acquisitions() == 1,"DataStore access was never attempted in a published game")
- assert(acquisitionFailure:LatestState(fallback).ReadOnly,"Store acquisition failure must preserve a playable temporary session")
-
+ assertReady(acquisitionFailure,fallback,1,1)
+ assert(acquisitionFailure:Acquisitions()==1 and acquisitionFailure:LatestState(fallback).ReadOnly)
  local denied=createHarness({gameId=1,updateFailure=true})
  local temporary=denied:AddPlayer(3)
- denied.Advance(1)
- assertReady(denied,temporary,0,1)
- assert(denied:LatestState(temporary).ReadOnly,"Disabled API Services must not silently promise persistence")
+ assertReady(denied,temporary,1,1)
+ assert(denied:LatestState(temporary).ReadOnly,"Disabled API Services promised persistence")
 
- local restored=createHarness({gameId=1,existing=true,profile={Coins=950,Checkpoint=20,Form=3,Mutations={['1']="Normal",['2']="Giant",['3']="Tiny"}}})
- restored.Advance(1)
- assertReady(restored,restored.Existing,20,3)
- assert(restored.Existing.leaderstats.Coins.Value == 950,"Stored coins were overwritten at startup")
+ local restored=createHarness({gameId=1,existing=true,profile={Coins=950,Checkpoint=20,Form=3,Mutations={["1"]="Normal",["2"]="Giant",["3"]="Tiny"}}})
+ assertReady(restored,restored.Existing,3,3)
+ assert(restored:LatestState(restored.Existing).Coins==950,"Legacy coins were overwritten")
+ assert(restored:LatestState(restored.Existing).Mutations["3"]=="Tiny","Legacy mutation was lost")
  restored:Respawn(restored.Existing)
- assertReady(restored,restored.Existing,20,3)
- assert(restored.Existing.LoadCount >= 2,"Death never respawned the player")
+ assertReady(restored,restored.Existing,3,3)
+ assert(restored.Existing.LoadCount>=2,"Death never respawned the player")
 
- local slow=createHarness({gameId=1,loadDelay=0.5,profile={Coins=600,Checkpoint=10,Form=2,Mutations={['1']="Normal",['2']="Normal"}}})
+ local slow=createHarness({gameId=1,loadDelay=0.5,profile={Coins=600,Unlocked=2,Form=2,Fullness=35,Mutations={}}})
  local loading=slow:AddPlayer(5)
- assert(loading.Character,"A slow DataStore request prevented safe character spawning")
- local root=loading.Character:FindFirstChild("HumanoidRootPart")
- root.Position=slow.World.Checkpoints[1].Position
- slow.World.OnCheckpoint(loading,1)
- slow:Remote().OnServerEvent:Fire(loading,"Morph",2)
- slow.Advance(0.1)
- assert(loading.leaderstats.Checkpoint.Value == 0,"Checkpoint rewards must wait until the profile claim finishes")
+ assert(loading.Character,"A slow DataStore prevented safe character spawning")
+ slow:Eat(loading,{Hunger=100,Coins=100})
+ slow:Send(loading,"Morph",2)
+ assert(slow:LatestState(loading).Fullness==0 and loading.Character:GetAttribute("Form")==1,"Loading player gained progress")
  slow.Advance(0.6)
- assertReady(slow,loading,10,2)
- assert(loading.leaderstats.Coins.Value == 600,"Temporary startup state overwrote the real profile")
+ assertReady(slow,loading,2,2)
+ assert(slow:LatestState(loading).Coins==600 and slow:LatestState(loading).Fullness==35,"Loading state overwrote real profile")
 
  local departed=createHarness({gameId=1,loadDelay=0.5})
- local leaving=departed:AddPlayer(6)
- departed:RemovePlayer(leaving)
- departed.Advance(1)
- assert(departed:Stored().Session == nil,"Leaving during profile loading retained a stale session lease")
- assert(departed:Stored().Lease == 0,"Leaving during profile loading did not release the lease")
-
- -- Simulate a response that arrives after its original lease has expired.
- -- A subsequent join can now own the same profile in this server.
- local rejoin=createHarness({gameId=1,returnDelay=181})
- local original=rejoin:AddPlayer(9)
- rejoin:RemovePlayer(original)
- rejoin.Advance(180.1)
- local current=rejoin:AddPlayer(9)
- local currentSession=rejoin:Stored().Session
- assertReady(rejoin,current,0,1)
- rejoin.Advance(1)
- assert(rejoin:Stored().Session == currentSession,"Late loading cleanup released a newer join's lease")
- assert(rejoin:Stored().Lease > 10181,"Late loading cleanup invalidated a newer join's lease")
-
- local foreign=createHarness({gameId=1,profile={Coins=123,Checkpoint=10,Form=2,Mutations={},Session="other-server",Lease=20000}})
+ local leaving=departed:AddPlayer(6);departed:RemovePlayer(leaving);departed.Advance(1)
+ assert(departed:Stored(6).Session==nil and departed:Stored(6).Lease==0,"Leaving while loading retained a lease")
+ local foreign=createHarness({gameId=1,profile={Coins=123,Unlocked=2,Form=2,Session="other-server",Lease=20000}})
  local rejected=foreign:AddPlayer(7)
- foreign.Advance(1)
- assert(rejected.Kicked,"A locked profile was accepted by a second server")
- assert(foreign:Stored().Session == "other-server" and foreign:Stored().Coins == 123,"Another server's saved profile was overwritten")
+ assert(rejected.Kicked,"A foreign session lock was ignored")
+ assert(foreign:Stored(7).Session=="other-server" and foreign:Stored(7).Coins==123)
 
- local retry=createHarness({gameId=1,profile={Coins=950,Checkpoint=20,Form=3,Mutations={['1']="Normal",['2']="Normal",['3']="Normal"}}})
- local playing=retry:AddPlayer(8)
- retry.Advance(1)
- playing.Character.HumanoidRootPart.Position=retry.World.Checkpoints[21].Position
- retry.World.OnCheckpoint(playing,21)
- retry:FailUpdates(true)
- retry.Advance(60)
- assert(retry:LatestState(playing).ReadOnly == false,"A temporary save error discarded session ownership")
- retry:FailUpdates(false)
- retry.Advance(60)
- assert(retry:Stored().Coins == 1050 and retry:Stored().Checkpoint == 21,"Autosave did not recover after a transient DataStore error")
- retry:RemovePlayer(playing)
- assert(retry:Stored().Session == nil,"PlayerRemoving did not release saved session ownership")
+ -- Food fills the meter without silently evolving; selection never lowers progress.
+ unpublished:Eat(player,{Name="Quả mọng",Hunger=0.5,Coins=4})
+ assert(unpublished:LatestState(player).Fullness==0.5,"Fractional food fullness was rounded away")
+ for _=1,10 do unpublished:Eat(player,{Name="Táo",Hunger=10,Coins=10}) end
+ assert(unpublished:LatestState(player).Fullness==100 and unpublished:LatestState(player).Unlocked==1,"Food auto-evolved the player")
+ for _,value in ipairs({"2",-1,2,1.5,math.huge,0/0}) do unpublished:Send(player,"Morph",value) end
+ assert(player.Character:GetAttribute("Form")==1,"Malformed/locked form was accepted")
+ unpublished:Send(player,"Evolve")
+ assertReady(unpublished,player,2,2)
+ assert(unpublished:LatestState(player).Fullness==0 and unpublished:LatestState(player).Mutations["2"]=="Normal")
+ local evolutionEffect
+ for _,event in ipairs(unpublished:Remote().Events) do
+  if event.Player==player and event.Action=="Evolution" then evolutionEffect=event.Data end
+ end
+ assert(evolutionEffect==2,"Manual evolution did not announce its new form for client effects")
+ unpublished:Send(player,"Morph",1);unpublished:Eat(player,{Hunger=100,Coins=0});unpublished:Send(player,"Evolve")
+ assertReady(unpublished,player,3,3)
+ unpublished:Roll(100);unpublished:Eat(player,{Hunger=1,Coins=0},{MutationFood=true,Boost=1})
+ assert(unpublished:LatestState(player).Mutations["3"]=="Awakened" and unpublished:LatestState(player).FreeRerolls==0)
+ unpublished:Roll(1);unpublished:Send(player,"Reroll")
+ assert(unpublished:LatestState(player).Mutations["3"]=="Awakened","Non-pass player rerolled")
+ unpublished:Eat(player,{Hunger=0.5,Coins=4})
+ assert(unpublished:LatestState(player).Mutations["3"]=="Awakened","Ordinary food rerolled a mutation")
 
- unpublished:Close()
- assert(unpublished:Updates() == 0,"Temporary sessions attempted to persist during shutdown")
+ local premium=createHarness({pass=true})
+ local paid=premium:AddPlayer(20)
+ premium:Eat(paid,{Hunger=10,Coins=10})
+ assert(premium:LatestState(paid).Fullness==15 and premium:LatestState(paid).Coins==15,"Pass multipliers were not applied")
+ premium:Roll(100);premium:Eat(paid,{Hunger=1,Coins=0},{MutationFood=true,Boost=3})
+ assert(premium:LatestState(paid).FreeRerolls==2 and premium:LatestState(paid).LastMutationBoost==3)
+ premium:Send(paid,"Reroll");assert(premium:LatestState(paid).FreeRerolls==1)
+ premium:Eat(paid,{Hunger=1,Coins=0},{MutationFood=true,Boost=1})
+ assert(premium:LatestState(paid).FreeRerolls==2 and premium:LatestState(paid).LastMutationBoost==1,"Meal rerolls stacked")
+ premium:Send(paid,"Reroll");premium:Send(paid,"Reroll");premium:Send(paid,"Reroll")
+ assert(premium:LatestState(paid).FreeRerolls==0,"Free rerolls went negative")
 
- print("PASS: DataStore boot/failure/retry; existing players; restored profile; death/respawn; delayed loading; leave-during-load; session locks")
+ local death=createHarness({gameId=1,pass=true,profile={Coins=100,Unlocked=3,Form=3,Fullness=20}})
+ local traveller=death:AddPlayer(30)
+ local deathPosition=death.Vector(2500,16,50);traveller.Character.HumanoidRootPart.Position=deathPosition
+ death:Respawn(traveller)
+ local call=death.World.RandomCalls[#death.World.RandomCalls]
+ assert(call.Biome=="forest" and call.Origin==deathPosition and call.Minimum==Config.DeathRespawnStuds,"Death omitted same-biome 200 m placement")
+ assert((traveller.Character.HumanoidRootPart.Position-deathPosition).Magnitude>=200/0.28)
+ assert(death:LatestState(traveller).ReviveAvailable,"Pass user lost near-respawn offer")
+ death:Send(traveller,"ReviveNear")
+ assert((traveller.Character.HumanoidRootPart.Position-deathPosition).Magnitude<1,"Near revival stayed far from death")
+ local readyAt=death:Stored(30).NearReviveReadyAt
+ assert(death:LatestState(traveller).ReviveCooldown==180 and readyAt>10180,"Near revival cooldown was not saved")
+ death:Respawn(traveller)
+ local farPosition=traveller.Character.HumanoidRootPart.Position
+ death:Send(traveller,"ReviveNear")
+ assert(traveller.Character.HumanoidRootPart.Position==farPosition,"Near revival ignored active cooldown")
+ death:RemovePlayer(traveller)
+ local rejoined=death:AddPlayer(30)
+ assert(death:LatestState(rejoined).ReviveCooldown>0 and death:Stored(30).NearReviveReadyAt==readyAt,"Rejoin reset near-revive cooldown")
+ death.Advance(181);death:Respawn(rejoined)
+ assert(death:LatestState(rejoined).ReviveAvailable,"Near revival never became available after three minutes")
+ death:Send(rejoined,"ReviveNear")
+ assert(death:Stored(30).NearReviveReadyAt==death:UnixTime()+180,"A second near revival did not restart cooldown")
+
+ local expiredOffer=createHarness({pass=true})
+ local late=expiredOffer:AddPlayer(31);expiredOffer:Respawn(late);expiredOffer.Advance(121)
+ local latePosition=late.Character.HumanoidRootPart.Position
+ expiredOffer:Send(late,"ReviveNear")
+ assert(late.Character.HumanoidRootPart.Position==latePosition and not expiredOffer:LatestState(late).ReviveAvailable,"Expired revival offer remained usable")
+
+ local hazardousDeath=createHarness({pass=true,unsafeGround=true})
+ local swimmer=hazardousDeath:AddPlayer(32)
+ local hazardPosition=hazardousDeath.Vector(2500,16,0)
+ swimmer.Character.HumanoidRootPart.Position=hazardPosition
+ hazardousDeath:Respawn(swimmer);hazardousDeath:Send(swimmer,"ReviveNear")
+ assert(hazardousDeath.World.NearestCall.Biome=="forest" and hazardousDeath.World.NearestCall.Origin==hazardPosition,"Hazardous near revival did not choose the nearest safe spot in the death biome")
+ assert((swimmer.Character.HumanoidRootPart.Position-hazardPosition).Magnitude==30,"Hazardous near revival used an arbitrary distant spawn")
+
+ local deathExit=createHarness({gameId=1,profile={Unlocked=3,Form=3}})
+ local quitter=deathExit:AddPlayer(33)
+ local exitDeath=deathExit.Vector(2500,16,40)
+ quitter.Character.HumanoidRootPart.Position=exitDeath
+ deathExit:Kill(quitter)
+ assert(quitter.LoadCount==1,"Death-exit case already respawned before leaving")
+ deathExit:RemovePlayer(quitter)
+ local exitPosition=deathExit:Stored(33).Position
+ assert(exitPosition and exitPosition.Biome=="forest","Leaving while dead did not persist the chosen same-biome respawn")
+ local returned=deathExit:AddPlayer(33)
+ local returnedPosition=returned.Character.HumanoidRootPart.Position
+ assert(deathExit.World.PositionBiome(returnedPosition)=="forest" and (returnedPosition-exitDeath).Magnitude>=200/0.28,"Rejoining after death bypassed the same-biome 200 m respawn")
+ assert(returnedPosition.X==exitPosition.X and returnedPosition.Z==exitPosition.Z,"Rejoin ignored the saved death respawn destination")
+
+ -- Contact enables a shove beyond the small initial collider's adjacency range.
+ local combat=createHarness({gameId=1,profiles={[40]={Unlocked=15,Form=1},[41]={Unlocked=1,Form=1}}})
+ local attacker=combat:AddPlayer(40);local victim=combat:AddPlayer(41)
+ combat.Advance(9)
+ attacker.Character.HumanoidRootPart.Position=combat.Vector(0,16,0)
+ victim.Character.HumanoidRootPart.Position=combat.Vector(6,16,0)
+ combat:Send(attacker,"Attack")
+ local victimRoot=victim.Character.HumanoidRootPart
+ assert(#victimRoot.Impulses==0,"Attack hit a distant non-contact player")
+ combat:Touch(attacker,victim);combat.Advance(Config.AttackCooldown);combat:Send(attacker,"Attack")
+ assert(#victimRoot.Impulses==1,"Contact did not enable attack")
+ local smallImpulse=victimRoot.Impulses[1]
+ combat:Send(attacker,"Morph",15);combat.Advance(Config.AttackCooldown)
+ combat:Touch(attacker,victim);combat:Send(attacker,"Attack")
+ assert(#victimRoot.Impulses==2 and victimRoot.Impulses[2].X>smallImpulse.X,"Higher species did not push farther")
+ combat:BlockAttack(true);combat.Advance(Config.AttackCooldown);combat:Touch(attacker,victim);combat:Send(attacker,"Attack")
+ assert(#victimRoot.Impulses==2,"Shove passed through a blocking wall")
+ combat:BlockAttack(false);combat:Respawn(attacker)
+ attacker.Character.HumanoidRootPart.Position=combat.Vector(0,16,0)
+ combat:Touch(attacker,victim);combat:Send(attacker,"Attack")
+ assert(#victimRoot.Impulses==2,"Protected respawn could attack")
+
+ local transport=createHarness({gameId=1,profile={Coins=300,Unlocked=1,Form=1}})
+ local commuter=transport:AddPlayer(42)
+ local toll=transport.Instance("Part");toll.Position=transport.Vector(0,16,0)
+ assert(transport.World.Callbacks.OnBridge(commuter,toll,150))
+ assert(transport:LatestState(commuter).Coins==150,"Bridge did not charge in-game money")
+ commuter.Character.HumanoidRootPart.Position=transport.Vector(200,16,0)
+ assert(not transport.World.Callbacks.OnBridge(commuter,toll,150),"Distant bridge payment was accepted")
+ assert(transport:LatestState(commuter).Coins==150,"Rejected bridge payment changed coins")
+ transport.World.Teleports.a={Part=toll,Cost=250};transport.World.Teleports.b={Name="Núi tuyết"}
+ commuter.Character.HumanoidRootPart.Position=toll.Position
+ assert(not transport.World.Callbacks.OnTeleport(commuter,"a","b"),"Teleport ignored insufficient funds")
+ transport:Eat(commuter,{Hunger=0.5,Coins=150})
+ assert(transport.World.Callbacks.OnTeleport(commuter,"a","b"))
+ assert(transport:LatestState(commuter).Coins==50,"Teleport did not charge its source cost")
+ assert(not transport.World.Callbacks.OnTeleport(commuter,"a","a"),"Same-node teleport charged money")
+
+ -- Granting is durable/idempotent; delivery removes only the credit, never its receipt.
+ local receipts=createHarness({gameId=1})
+ local buyer=receipts:AddPlayer(50)
+ assert(receipts.Commerce.Callbacks.CanPurchaseDrop(buyer))
+ assert(receipts:Grant(buyer,"receipt-a"));receipts:Flush(buyer)
+ assert(receipts:Stored(50).DropCredits["receipt-a"] and receipts.Events.RequestCounts["receipt-a"]==1)
+ assert(receipts:Grant(buyer,"receipt-a"));receipts:Flush(buyer)
+ assert(receipts.Events.RequestCounts["receipt-a"]==1,"Repeated receipt queued duplicate drops")
+ assert(receipts:Delivered(buyer,"receipt-a"))
+ assert(receipts:Stored(50).DropCredits["receipt-a"]==nil and receipts:Stored(50).ReceiptIds["receipt-a"])
+ assert(receipts:Grant(buyer,"receipt-a"));receipts:Flush(buyer)
+ assert(receipts:Stored(50).DropCredits["receipt-a"]==nil and receipts.Events.RequestCounts["receipt-a"]==1,"Delivered receipt was granted twice")
+ receipts:FailUpdates(true);assert(not receipts:Grant(buyer,"receipt-b"))
+ receipts:FailUpdates(false);assert(receipts:Grant(buyer,"receipt-b"))
+ receipts:RejectDrops(true);receipts:Flush(buyer)
+ assert(receipts.Events.RequestCounts["receipt-b"]==nil)
+ receipts:RejectDrops(false);receipts.Advance(60)
+ assert(receipts.Events.RequestCounts["receipt-b"]==1,"Unqueued durable credit was not retried")
+ assert(receipts:Stored(50).DropDispatches["receipt-b"],"Queued paid drop was not durably reserved")
+ local dispatch=receipts:Stored(50).DropDispatches["receipt-b"]
+ assert(dispatch.Lease==receipts:UnixTime()+360,"Dispatch lease must cover the three-minute warning and delivery retries")
+ -- Leaving saves ordinary progress while preserving pending delivery ownership.
+ receipts:RemovePlayer(buyer)
+ assert(receipts:Stored(50).DropDispatches["receipt-b"].Server==dispatch.Server,"Leave discarded an active dispatch lease")
+ local recovered=createHarness({gameId=1,profile=receipts:Stored(50),timeBase=receipts:UnixTime()})
+ local recoveredBuyer=recovered:AddPlayer(50)
+ assert(recovered.Events.RequestCounts["receipt-b"]==nil,"Server hop duplicated an incoming paid drop")
+ recovered.Advance(359)
+ assert(recovered.Events.RequestCounts["receipt-b"]==nil,"Foreign dispatch lease expired too early")
+ recovered.Advance(1)
+ assert(recovered.Events.RequestCounts["receipt-b"]==1,"Expired crash lease never recovered its durable paid credit")
+ assert(recovered:Stored(50).DropDispatches["receipt-b"].Server~=dispatch.Server,"Recovery did not transfer dispatch ownership")
+ recovered:RemovePlayer(recoveredBuyer)
+ local changed=recovered:Stored(50);changed.Session="newer-server";changed.Coins=1234
+ assert(recovered:Delivered(recoveredBuyer,"receipt-b"))
+ assert(recovered:Stored(50).Session=="newer-server" and recovered:Stored(50).Coins==1234,"Late delivery overwrote another session's progress")
+ assert(recovered:Stored(50).DropCredits["receipt-b"]==nil)
+
+ local retry=createHarness({gameId=1,profile={Coins=950,Unlocked=3,Form=3,Fullness=20}})
+ local playing=retry:AddPlayer(60);retry:Eat(playing,{Hunger=5,Coins=100})
+ retry:FailUpdates(true);retry.Advance(60)
+ assert(retry:LatestState(playing).ReadOnly==false,"Transient save failure discarded session ownership")
+ retry:FailUpdates(false);retry.Advance(60)
+ assert(retry:Stored(60).Coins==1050 and retry:Stored(60).Fullness==25,"Autosave never recovered")
+ retry:RemovePlayer(playing);assert(retry:Stored(60).Session==nil,"Leave retained saved session ownership")
+ unpublished:Close();assert(unpublished:Updates()==0,"Temporary shutdown attempted persistence")
+ print("PASS: actual server boot/loading/migration; fractional food/manual evolution/morph guards; pass rerolls; biome death/near cooldown; contact shoves; durable idempotent drops and cross-server dispatch leases; save retry")
 end

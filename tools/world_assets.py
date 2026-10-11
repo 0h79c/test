@@ -1,246 +1,286 @@
-"""Canonical, self-contained Evolution Obby scenery and gameplay geometry.
+"""Seeded open world shared by the embedded Studio scene and runtime builder.
 
-The same descriptors are embedded in the place and exported to WorldLayout.luau,
-so opening the place in Studio never depends on server startup to show the map.
+No external assets are required. Regenerating with another seed randomises
+natural scenery while keeping topology, safe spawns and travel services stable.
 """
 from __future__ import annotations
-
 import json
 import math
+import random
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-THEMES = [
-    ("VƯỜN KHỞI ĐẦU", (99, 185, 112), (55, 120, 76), "Grass"),
-    ("KHU RỪNG NẤM", (151, 200, 106), (111, 68, 148), "Grass"),
-    ("HANG PHA LÊ", (94, 169, 209), (91, 108, 192), "Slate"),
-    ("ĐẦM LẦY ẾCH", (93, 173, 138), (53, 118, 130), "Grass"),
-    ("BỜ BIỂN RÙA", (240, 210, 133), (75, 179, 206), "Sand"),
-    ("ĐỒNG HOA THỎ", (154, 203, 144), (244, 160, 196), "Grass"),
-    ("PHỐ MÈO", (157, 151, 217), (93, 88, 153), "Brick"),
-    ("THUNG LŨNG CHÓ SĂN", (177, 165, 113), (101, 143, 94), "Grass"),
-    ("RỪNG KHỈ", (70, 147, 105), (215, 165, 66), "Grass"),
-    ("THẢO NGUYÊN BÁO", (228, 188, 97), (200, 122, 67), "Sand"),
-    ("CAO NGUYÊN CHUỘT TÚI", (203, 140, 112), (142, 86, 103), "Rock"),
-    ("NÚI TINH TINH", (135, 151, 173), (91, 109, 146), "Slate"),
-    ("MÂY NGỰA CÁNH", (182, 204, 239), (148, 126, 218), "Snow"),
-    ("ĐỈNH PHƯỢNG HOÀNG", (236, 156, 91), (186, 69, 68), "Basalt"),
+SEED = 734091
+METERS_PER_STUD = 0.28
+BIOME_WIDTH, BIOME_DEPTH, GROUND_Y = 1440, 840, 12
+BIOMES = [
+    ('forest','RỪNG CỔ THỤ',-1440,-840,(61,115,79),(43,94,64),'Grass'),
+    ('mountains','NÚI ĐÁ PHA LÊ',0,-840,(137,150,149),(94,111,127),'Rock'),
+    ('snow','CAO NGUYÊN TUYẾT',1440,-840,(220,235,237),(153,202,218),'Snow'),
+    ('plains','ĐỒNG BẰNG NẮNG',-1440,0,(175,190,102),(126,152,72),'Grass'),
+    ('meadow','ĐỒNG CỎ HOA',0,0,(128,184,108),(95,151,90),'Grass'),
+    ('river','SÔNG NGỌC LAM',1440,0,(97,166,142),(66,145,153),'Grass'),
+    ('swamp','ĐẦM LẦY PHÁT SÁNG',-1440,840,(75,115,94),(95,137,115),'Grass'),
+    ('desert','SA MẠC HỔ PHÁCH',0,840,(224,192,128),(193,153,100),'Sand'),
+    ('volcano','NÚI LỬA TRO ĐỎ',1440,840,(78,73,86),(118,81,87),'Basalt'),
 ]
 
 
-def stage_position(stage: int) -> tuple[float, float, float]:
-    return (stage * 26, 11, round(7 * math.sin(stage * math.pi / 5), 3))
+def biome_at(x,z):
+    for ident,_,cx,cz,*_ in BIOMES:
+        if cx-720 <= x <= cx+720 and cz-420 <= z <= cz+420:
+            return ident
+    return None
 
 
-def descriptors() -> list[dict]:
-    records: list[dict] = []
+def protected_regions():
+    return [
+        dict(Biome='river',MinX=1374,MaxX=1506,MinZ=-420,MaxZ=420,Kind='water'),
+        dict(Biome='swamp',MinX=-1740,MaxX=-1540,MinZ=910,MaxZ=1030,Kind='swamp'),
+        dict(Biome='swamp',MinX=-1155,MaxX=-975,MinZ=620,MaxZ=730,Kind='swamp'),
+        dict(Biome='volcano',MinX=1640,MaxX=1820,MinZ=780,MaxZ=1020,Kind='lava'),
+        dict(Biome='mountains',MinX=-200,MaxX=220,MinZ=-1190,MaxZ=-970,Kind='landmark'),
+        dict(Biome='snow',MinX=1590,MaxX=1840,MinZ=-1180,MaxZ=-960,Kind='landmark'),
+        dict(Biome='desert',MinX=310,MaxX=580,MinZ=910,MaxZ=1110,Kind='landmark'),
+    ]
 
-    def add(name, size, position, color, **kwargs):
-        record = dict(name=name, size=list(size), position=list(position), color=list(color), group="Scenery")
-        record.update(kwargs)
-        records.append(record)
-        return record
 
-    def text(name, position, title, subtitle="", color=(244, 246, 255), width=320, height=88):
-        return add(name, (1, 1, 1), position, color, collide=False, transparency=1,
-                   billboard=dict(title=title, subtitle=subtitle, width=width, height=height))
+def safe_point(x,z,clearance=22):
+    if biome_at(x,z) is None:
+        return False
+    return not any(r['MinX']-clearance < x < r['MaxX']+clearance and
+                   r['MinZ']-clearance < z < r['MaxZ']+clearance for r in protected_regions())
 
-    # A tangible, neutral spawn and a large landing platform exist before any script runs.
-    add("LobbyGround", (82, 3, 112), (-16, 8.5, -16), (47, 66, 94), material="Slate")
-    add("LobbyFloor", (80, 0.35, 110), (-16, 10.2, -16), (68, 94, 116), material="SmoothPlastic")
-    add("StartSpawn", (16, 1, 16), (0, 11, 0), (102, 229, 177), group="Gameplay",
-        class_name="SpawnLocation", kind="spawn", material="Neon", rotation=(0, -90, 0))
-    # Decorative rails stop accidental falls around the lobby, leaving the course entrance open.
-    for name, size, position in [
-        ("LobbyBackRail", (1.2, 4, 112), (-57, 12, -16)),
-        ("LobbyNorthRail", (82, 4, 1.2), (-16, 12, -72)),
-        ("LobbySouthRail", (82, 4, 1.2), (-16, 12, 40)),
-    ]:
-        add(name, size, position, (96, 150, 176), transparency=.15, material="Glass")
-    text("WelcomeSign", (-14, 22, 11), "EVOLUTION OBBY", "140 checkpoint • 15 loài • 5 đột biến", (132, 240, 205), 450, 110)
-    text("Instructions", (-28, 15, 18), "ĐI THEO MŨI TÊN →", "WASD di chuyển · Space nhảy · E tại trạm đột biến", width=400, height=80)
-    text("GallerySign", (-27, 19, -47), "SÁCH TIẾN HÓA", "Cứ 10 checkpoint: mở khóa hình dạng mới", (243, 210, 131), 380)
-    text("SaveHint", (-43, 13, 2), "ĐƯỜNG MÀU XANH = CHECKPOINT", "Rơi hoặc chạm dung nham: hồi sinh tại mốc gần nhất", width=370, height=80)
-    species = ("Ốc Sên", "Sâu Bướm", "Chuột", "Ếch", "Rùa", "Thỏ", "Mèo", "Chó Săn", "Khỉ", "Báo Gấm", "Chuột Túi", "Tinh Tinh", "Ngựa Cánh", "Phượng Hoàng", "Rồng Trắng")
-    for index, species_name in enumerate(species):
-        gx, gz = -44 + index % 5 * 12, -28 - index // 5 * 16
-        add(f"GalleryPodium{index + 1:02d}", (10, 1, 10), (gx, 10.8, gz), (86, 103, 137), material="Slate")
-        add(f"GalleryRim{index + 1:02d}", (10.2, .12, 10.2), (gx, 11.35, gz), (134, 209, 227), material="Neon", collide=False)
-        text(f"GalleryLabel{index + 1:02d}", (gx, 16.8, gz), f"{index + 1:02d} · {species_name}", f"{index * 10} checkpoint", (231, 239, 255), width=145, height=54)
 
-    # Fourteen compact themed islands. The lower ledge catches modest missed jumps;
-    # it is still necessary to visit the numbered checkpoints in order.
-    for zone, (title, grass, accent, material) in enumerate(THEMES):
-        x = zone * 260 + 130
-        add(f"Island{zone:02d}", (258, 5, 78), (x, 5.5, 0), grass, material=material)
-        add(f"IslandRock{zone:02d}", (246, 10, 68), (x, -1.5, 0), (67, 76, 95), material="Rock")
-        text(f"ZoneSign{zone:02d}", (zone * 260 + 28, 20, -22), f"{zone + 1:02d} · {title}",
-             f"Checkpoint {zone * 10 + 1}–{(zone + 1) * 10}", accent, width=370)
-        for edge in range(5):
-            tx = zone * 260 + 30 + edge * 49
-            # Deterministic scenery never obstructs the playable corridor.
-            if zone in (2, 10, 11, 13):
-                add(f"Crystal{zone}_{edge}", (3 + edge % 2, 11 + edge % 3 * 3, 3), (tx, 14, -28), accent,
-                    material="Neon" if zone in (2, 13) else "Slate", rotation=(0, 20 + edge * 13, 12))
-                add(f"Rock{zone}_{edge}", (10, 7, 7), (tx + 11, 10, 27), accent, shape="Ball", material="Rock")
-            elif zone == 12:
-                add(f"Cloud{zone}_{edge}", (22, 6, 12), (tx, 14, -27), (235, 240, 255), shape="Ball", collide=False)
-                add(f"CloudSmall{zone}_{edge}", (13, 7, 12), (tx + 9, 15, -27), (242, 246, 255), shape="Ball", collide=False)
-            elif zone == 4:
-                add(f"PalmTrunk{zone}_{edge}", (2, 12, 2), (tx, 14, -27), (147, 107, 67), material="Wood")
-                for leaf in range(3):
-                    add(f"PalmLeaf{zone}_{edge}_{leaf}", (14, .6, 3), (tx, 20, -27), (58, 154, 93),
-                        rotation=(0, leaf * 60, 12), collide=False)
+def world_config(seed=SEED):
+    spawns,foods,biomes=[],[],[]
+    for ident,label,cx,cz,color,_,_ in BIOMES:
+        biomes.append(dict(Id=ident,Name=label,Center=[cx,GROUND_Y,cz],
+                           MinX=cx-720,MaxX=cx+720,MinZ=cz-420,MaxZ=cz+420,
+                           Size=[1440,0,840],Color=list(color),AreaSquareMeters=round(1440*840*.28**2,2)))
+        for dx in (-688,-568,-448,-328,-208,-88,32,152,272,392,512,688):
+            for dz in (-368,-248,-128,-8,112,232,368):
+                x,z=cx+dx,cz+dz
+                if safe_point(x,z,12):
+                    spawns.append(dict(Position=[x,12.1,z],Biome=ident))
+        for dx in range(-600,601,150):
+            for dz in range(-300,301,150):
+                x,z=cx+dx,cz+dz
+                if safe_point(x,z):
+                    foods.append(dict(Position=[x,12.1,z],Biome=ident))
+    return dict(Seed=seed,MetersPerStud=.28,BiomeWidth=1440,BiomeDepth=840,GroundY=12,MapSize=[4320,0,2520],
+                RespawnDistanceMeters=200,RespawnDistanceStuds=200/.28,
+                BridgeCost=150,TeleportCost=250,Biomes=biomes,
+                SafeSpawns=spawns,FoodSpawnPoints=foods,ProtectedRegions=protected_regions(),
+                Bridge=dict(Id='river_bridge',X=1440,Z=-205,HalfLength=92,HalfWidth=14),
+                Teleports=[dict(Id='meadow',Name='Đồng cỏ',Biome='meadow',Cost=250,Position=[-65,13,-65]),
+                           dict(Id='snow',Name='Cao nguyên tuyết',Biome='snow',Cost=250,Position=[1250,13,-700]),
+                           dict(Id='volcano',Name='Núi lửa',Biome='volcano',Cost=250,Position=[1260,13,650])])
+
+
+def descriptors(seed=SEED):
+    rng=random.Random(seed)
+    records=[]
+    config=world_config(seed)
+    reserved=config['SafeSpawns']+config['FoodSpawnPoints']
+    reserved += [dict(Position=t['Position'],Biome=t['Biome']) for t in config['Teleports']]
+
+    def add(name,size,position,color,**kwargs):
+        r=dict(name=name,size=[round(v,3) for v in size],position=[round(v,3) for v in position],
+               color=list(color),group='Details')
+        r.update(kwargs)
+        records.append(r)
+        return r
+
+    def text(name,position,title,subtitle='',color=(239,245,219),width=350,height=80):
+        return add(name,(1,1,1),position,color,collide=False,transparency=1,
+                   billboard=dict(title=title,subtitle=subtitle,width=width,height=height))
+
+    def decoration_position(row,radius=18):
+        ident,_,cx,cz,*_=row
+        for _ in range(150):
+            x,z=rng.uniform(cx-660,cx+660),rng.uniform(cz-360,cz+360)
+            if not safe_point(x,z,radius+8):
+                continue
+            if ident=='meadow' and math.hypot(x,z)<90:
+                continue
+            if ident=='river' and (abs(z+205)<36 or abs(z-155)<30):
+                continue
+            if any(math.hypot(x-p['Position'][0],z-p['Position'][2]) < radius+18
+                   for p in reserved if p['Biome']==ident):
+                continue
+            return x,z
+        return None
+
+    def tree(prefix,x,z,color,height=28,pine=False,willow=False):
+        # Cylinders point along local X, hence the 90degree Z rotation.
+        add(prefix+'Trunk',(height*.72,2.8,2.8),(x,12+height*.36,z),(109,81,63),
+            material='Wood',shape='Cylinder',rotation=(0,0,90))
+        if pine:
+            for layer in range(3):
+                width=height*(.58-layer*.13)
+                for side in range(2):
+                    add(prefix+f'Needles{layer}_{side}',(width,height*.36,width),
+                        (x,12+height*(.48+layer*.2),z),tuple(min(255,c+layer*10) for c in color),
+                        class_name='WedgePart',rotation=(0,side*180,0),collide=False)
+        else:
+            for branch,(dx,dz,s) in enumerate(((0,0,1),(-.28,.12,.8),(.25,-.16,.85))):
+                add(prefix+f'Crown{branch}',(height*.8*s,height*.57*s,height*.72*s),
+                    (x+dx*height,12+height*(.88+branch*.035),z+dz*height),
+                    tuple(min(255,c+branch*11) for c in color),shape='Ball',collide=False)
+            if willow:
+                for strand in range(5):
+                    a=strand*math.pi*2/5
+                    add(prefix+f'Drape{strand}',(2,height*.52,3.2),
+                        (x+math.cos(a)*height*.29,12+height*.65,z+math.sin(a)*height*.29),
+                        tuple(min(255,c+18) for c in color),collide=False)
+
+    def rocks(prefix,x,z,color,scale=1):
+        for n in range(3):
+            sx,sy,sz=rng.uniform(5,10)*scale,rng.uniform(4,8)*scale,rng.uniform(5,9)*scale
+            add(prefix+f'Facet{n}',(sx,sy,sz),(x+n*2.6*scale,12+sy/2-.4,z+(n%2)*2*scale),
+                tuple(min(255,c+n*12) for c in color),class_name='WedgePart',material='Rock',rotation=(0,rng.randint(0,359),0))
+
+    for row in BIOMES:
+        ident,label,cx,cz,ground,accent,material=row
+        if ident=='river':
+            for iz in range(3):
+                for side in (-1,1):
+                    add(f'Ground_river_{iz}_{side}',(654,30,280),(cx+side*393,-3,cz-280+iz*280),
+                        ground,group='GroundTerrain',material=material)
+        else:
+            for ix in range(4):
+                for iz in range(3):
+                    color=tuple(max(0,min(255,c+rng.randint(-4,4))) for c in ground)
+                    add(f'Ground_{ident}_{ix}_{iz}',(360,30,280),(cx-540+ix*360,-3,cz-280+iz*280),
+                        color,group='GroundTerrain',material=material)
+        for n in range(28):
+            p=decoration_position(row,7)
+            if p:
+                x,z=p
+                add(f'{ident}_Moss{n}',(rng.uniform(18,45),.16,rng.uniform(16,38)),(x,12.03,z),
+                    tuple(max(0,min(255,c+rng.randint(-10,10))) for c in accent),shape='Ball',collide=False,material=material)
+        text('BiomeLabel_'+ident,(cx-500,32,cz-250),label,'Khám phá · tìm thức ăn · tiến hóa',tuple(min(255,c+55) for c in accent))
+        trees={'forest':135,'meadow':28,'plains':21,'mountains':12,'snow':42,'river':35,'swamp':44,'desert':0,'volcano':0}[ident]
+        for n in range(trees):
+            p=decoration_position(row,18)
+            if p:
+                green=(50,108,75) if ident=='forest' else (51,109,91) if ident=='snow' else (95,143,88)
+                tree(f'{ident}_Tree{n}_',*p,green,rng.uniform(22,45),pine=ident in ('snow','mountains'),willow=ident=='swamp')
+        for n in range(42 if ident in ('mountains','volcano','desert') else 20):
+            p=decoration_position(row,18)
+            if p:
+                rocks(f'{ident}_Rock{n}_',*p,(93,104,107) if ident not in ('volcano','desert') else accent,rng.uniform(.7,2.2))
+        for n in range(35 if ident in ('meadow','forest','plains','river') else 12):
+            p=decoration_position(row,4)
+            if not p:
+                continue
+            x,z=p
+            if ident in ('volcano','mountains','snow'):
+                for shard in range(3):
+                    add(f'{ident}_Crystal{n}_{shard}',(2.6,7+shard*2.5,2.6),(x+shard*2.5,16+shard,z),
+                        (113,221,237) if ident!='volcano' else (255,116,55),material='Neon',class_name='WedgePart',rotation=(0,shard*60,8),collide=False)
+            elif ident=='desert':
+                add(f'desert_Cactus{n}',(12,3,3),(x,18,z),(83,137,92),shape='Cylinder',rotation=(0,0,90))
+                add(f'desert_CactusArm{n}',(6,2,2),(x+2,18,z),(92,147,98),collide=False)
             else:
-                add(f"TreeTrunk{zone}_{edge}", (2.5, 10, 2.5), (tx, 13, -28), (124, 85, 60), material="Wood")
-                add(f"TreeCrown{zone}_{edge}", (11, 12, 11), (tx, 21, -28), accent, shape="Ball", collide=False)
-                add(f"FlowerStem{zone}_{edge}", (.6, 3, .6), (tx + 7, 9.5, 28), (62, 130, 81), collide=False)
-                add(f"Flower{zone}_{edge}", (4, 1, 4), (tx + 7, 11, 28), accent, shape="Ball", collide=False)
+                palette=((248,183,204),(244,220,144),(200,172,238),(254,241,205))
+                for b in range(3):
+                    fx,fz=x+b*1.8,z+(b%2)*2
+                    add(f'{ident}_Flower{n}_{b}_Stem',(.3,1.8,.3),(fx,12.9,fz),(81,135,82),collide=False)
+                    add(f'{ident}_Flower{n}_{b}_Petals',(2,.65,2),(fx,13.9,fz),palette[(n+b)%4],shape='Ball',collide=False)
+                    add(f'{ident}_Flower{n}_{b}_Pollen',(.5,.3,.5),(fx,14.3,fz),(255,225,126),shape='Ball',collide=False)
 
-    for stage in range(141):
-        x, y, z = stage_position(stage)
-        if stage:
-            add(f"Checkpoint{stage:03d}", (14, 1, 14), (x, y, z), (85, 219, 164),
-                material="SmoothPlastic", group="Gameplay", kind="checkpoint", stage=stage)
-            add(f"CheckpointGlow{stage:03d}", (12, .1, 12), (x, y + .55, z), (132, 250, 196),
-                material="Neon", collide=False)
-            text(f"CheckpointLabel{stage:03d}", (x, y + 6, z - 8), str(stage),
-                 "TIẾN HÓA!" if stage % 10 == 0 else "CHECKPOINT", (167, 255, 209), width=120, height=58)
-            # Recovery steps let the slow first form return from the island ledge.
-            add(f"RecoveryStep{stage:03d}", (8, 1, 3), (x, 9, z + 8), (86, 149, 121))
-        if stage < 140:
-            nx, _, nz = stage_position(stage + 1)
-            for step in (1, 2):
-                px = x + (nx - x) * step / 3
-                pz = z + (nz - z) * step / 3
-                # Max horizontal gap is <1.3 studs with the minimum 8-stud width.
-                width = 9 if stage < 30 else 8
-                add(f"Jump{stage:03d}_{step}", (width, 1, 10), (round(px, 3), y, round(pz, 3)),
-                    (109, 151, 225), group="Course", material="SmoothPlastic")
-                for chevron, yaw in enumerate((-35, 35)):
-                    add(f"Direction{stage:03d}_{step}_{chevron}", (2, .12, .45), (round(px, 3), y + .6, round(pz + (-.5 if chevron == 0 else .5), 3)),
-                        (236, 243, 255), collide=False, rotation=(0, yaw, 0))
-            cx, cz = x + (nx - x) / 3, z + (nz - z) / 3
-            add(f"Coin{stage + 1:03d}", (1.5, 1.5, 1.5), (round(cx, 3), y + 2.5, round(cz, 3)),
-                (255, 212, 75), group="Gameplay", kind="coin", id=stage + 1, value=25,
-                collide=False, shape="Ball", material="Neon")
-            # Red obstacles occupy only the centre strip; every form can go around.
-            if stage >= 30 and stage % 3 == 0:
-                add(f"Lava{stage:03d}", (1.25, .25, 4), (round(x + 17.33, 3), y + .7, round(z + (nz - z) * 2 / 3, 3)),
-                    (251, 79, 40), material="Neon", group="Gameplay", kind="hazard", collide=False)
-            if stage > 10 and stage % 5 == 2:
-                add(f"Hurdle{stage:03d}", (1, 1.25, 4), (round(x + 17.33, 3), y + 1.125, round(z + (nz - z) * 2 / 3, 3)),
-                    (237, 185, 82), material="Wood")
-        if stage % 10 == 0:
-            # The station has a generous platform attached to the checkpoint.
-            add(f"StationDeck{stage:03d}", (14, 1, 18), (x, y, z + 12), (98, 92, 157), material="SmoothPlastic")
-            add(f"MutationPad{stage:03d}", (6, .6, 6), (x, y + .8, z + 13), (192, 125, 249), group="Gameplay",
-                kind="station", material="Neon", prompt={"action": "Đột biến · 500 Coins", "object": "Trạm đột biến", "distance": 12})
-            add(f"StationRing{stage:03d}", (8, .3, 8), (x, y + .6, z + 13), (116, 71, 178), material="SmoothPlastic")
-            text(f"StationSign{stage:03d}", (x, y + 7, z + 15), "ĐỘT BIẾN", "Nhấn E · 500 Coins", (215, 175, 255), width=180, height=70)
-            if stage < 140:
-                text(f"EvolutionSign{stage:03d}", (x + 5, y + 10, z + 23),
-                     "HÌNH DẠNG MỚI" if stage else "BẮT ĐẦU BẰNG ỐC SÊN", "Mở Sách Tiến Hóa để đổi loài", (255, 223, 147), width=270, height=70)
-
-    # Optional mastery routes are clearly labelled and never block progression.
-    # Jump sizes are appropriate for the form already unlocked at the zone entry.
-    for index, stage in enumerate((30, 60, 90, 120)):
-        x, y, z = stage_position(stage)
-        accent = ((147, 217, 147), (219, 158, 245), (254, 199, 111), (163, 215, 251))[index]
-        text(f"BonusSign{stage}", (x + 38, 20, 29), "THỬ THÁCH PHỤ", "Lối dài bên phải · không bắt buộc", accent, width=270, height=75)
-        for step in range(5):
-            add(f"BonusStep{stage}_{step}", (7, 1, 7), (x + step * 10, y + step * 1.3, 28), accent,
-                group="Bonus", material="SmoothPlastic")
-        add(f"BonusReturn{stage}", (25, 1, 9), (x + 40, y + 5.2, 20), accent, group="Bonus")
-        # Ladder-like shallow staircase returns to the main course without a long fall.
-        for step in range(4):
-            add(f"BonusDown{stage}_{step}", (6, 1, 6), (x + 40 + step * 4, y + 5.2 - step * 1.3, 12 - step * 3), accent, group="Bonus")
-
-    # Ability trials are side routes: the central checkpoints always stay open.
-    def trial_entry(stage, length, title, hint, color):
-        tx, ty, tz = stage_position(stage)
-        add(f"TrialEntry{stage}", (14, 1, 21), (tx, ty, tz + 27), color, group="Trials")
-        add(f"TrialFloor{stage}", (length, 1, 20), (tx + length / 2 - 5, ty, 46), (63, 79, 108), group="Trials", material="Slate")
-        text(f"TrialTitle{stage}", (tx + 16, ty + 9, 37), title, hint, color, width=330, height=86)
-        return tx, ty
-
-    def trial_exit(stage, position):
-        add(f"TrialReturn{stage}", (8, .35, 8), position, (111, 236, 187), group="Gameplay", kind="return", material="Neon",
-            prompt={"action": "Về checkpoint", "object": "Kết thúc thử thách phụ", "distance": 10})
-        text(f"TrialReturnSign{stage}", (position[0], position[1] + 6, position[2]), "LỐI RA", "Nhấn E: về checkpoint", (151, 255, 211), width=180, height=65)
-
-    # Turtle's low body and Tiny mutation can fit beneath the low ceiling;
-    # turtle's shell also shields the laser beams.
-    tx, ty = trial_entry(40, 58, "ĐƯỜNG HẦM LASER", "Thử thách phụ · Rùa miễn nhiễm laser", (226, 143, 224))
-    for side in (-1, 1):
-        add(f"LaserTunnelWall{side}", (38, 4.5, 1), (tx + 24, ty + 2.75, 46 + side * 7), (83, 100, 134), group="Trials")
-    add("LaserTunnelRoof", (38, .5, 15), (tx + 24, ty + 5.15, 46), (138, 151, 178), group="Trials", transparency=.28)
-    for beam in range(4):
-        add(f"LowLaser{beam}", (.45, .45, 13), (tx + 11 + beam * 8, ty + 1.8, 46), (255, 60, 123), group="Gameplay",
-            kind="hazard", immune_form=5, material="Neon", collide=False)
-    trial_exit(40, (tx + 48, ty + .7, 46))
-
-    # The lava wall visibly travels along a dedicated speed track. It cannot
-    # cross the numbered course; waiting and movement use elapsed seconds.
-    tx, ty = trial_entry(90, 116, "CHẠY ĐUA DUNG NHAM", "Thử thách phụ · Báo Gấm chạy nhanh hơn bức tường", (255, 179, 95))
-    for side in (-1, 1):
-        add(f"RaceRail{side}", (116, 1, 1), (tx + 53, ty + 1.2, 46 + side * 10), (230, 137, 58), group="Trials")
-    add("MovingLavaWall", (2, 8, 18), (tx + 7, ty + 4.5, 46), (250, 85, 38), group="Gameplay", kind="hazard", immune_form=14,
-        material="Neon", collide=False, motion={"axis": "X", "distance": 92, "speed": 24, "pause": 6})
-    trial_exit(90, (tx + 104, ty + .7, 46))
-
-    # Wind really pushes players in this volume; Gorilla is heavy enough to
-    # stand firm. Visible ribbons and a broad platform make the danger clear.
-    tx, ty = trial_entry(110, 70, "HẺM NÚI GIÓ", "Thử thách phụ · Tinh Tinh đứng vững trước gió", (151, 218, 252))
-    add("WindVolume", (45, 15, 20), (tx + 28, ty + 7, 46), (117, 196, 248), group="Gameplay", kind="wind",
-        collide=False, transparency=1, immune_form=12, wind={"acceleration": 42, "max_speed": 22})
-    for ribbon in range(5):
-        add(f"WindRibbon{ribbon}", (35, .17, .35), (tx + 28, ty + 2 + ribbon * 1.1, 42 + ribbon * 1.4), (171, 231, 255),
-            group="Trials", material="Neon", transparency=.35, collide=False, rotation=(0, -8, 0))
-    trial_exit(110, (tx + 57, ty + .7, 46))
-
-    # Phoenix's existing fire immunity has a visible firewalk to demonstrate it.
-    tx, ty = trial_entry(130, 65, "CON ĐƯỜNG LỬA", "Thử thách phụ · Phượng Hoàng miễn nhiễm dung nham", (255, 154, 89))
-    add("PhoenixFirewalk", (38, .2, 16), (tx + 26, ty + .7, 46), (255, 79, 29), group="Gameplay", kind="hazard",
-        immune_form=14, material="Neon", collide=False)
-    for flame in range(6):
-        add(f"FirewalkFlame{flame}", (2, 3.5, 2), (tx + 9 + flame * 6, ty + 2.5, 39), (255, 174, 38),
-            group="Trials", shape="Ball", material="Neon", collide=False)
-    trial_exit(130, (tx + 52, ty + .7, 46))
-
-    x, y, z = stage_position(140)
-    add("FinaleIsland", (62, 4, 90), (x + 18, 8, 0), (205, 222, 239), material="Marble")
-    add("FinalePlatform", (45, 1, 36), (x + 25, y, z), (218, 229, 246), material="Marble")
-    for side in (-1, 1):
-        add(f"DragonGatePillar{side}", (4, 26, 4), (x + 23, y + 13, side * 16), (222, 236, 255), material="Marble")
-        add(f"DragonGateCrystal{side}", (5, 7, 5), (x + 23, y + 29, side * 16), (153, 226, 255), material="Neon", rotation=(0, 0, 20))
-    add("DragonGateTop", (4, 3, 36), (x + 23, y + 26, 0), (173, 199, 236), material="Marble")
-    text("VictorySign", (x + 28, y + 20, 0), "RỒNG TRẮNG ĐÃ THỨC TỈNH!", "Bạn đã hoàn thành 140 checkpoint", (231, 248, 255), width=470, height=110)
-    add("Void", (3900, 1, 250), (1800, -30, 0), (255, 70, 60), transparency=1,
-        group="Gameplay", kind="void", collide=False)
+    def mountain(prefix,x,z,width,depth,height,color):
+        for side in range(4):
+            # Four triangular slopes enclose a broad mountain rather than a cuboid.
+            add(prefix+f'Slope{side}',(width if side%2==0 else depth,height,depth/2 if side%2==0 else width/2),
+                (x+(width/4 if side==1 else -width/4 if side==3 else 0),12+height/2,
+                 z+(depth/4 if side==0 else -depth/4 if side==2 else 0)),
+                tuple(min(255,c+side*6) for c in color),material='Rock',class_name='WedgePart',rotation=(0,side*90+180,0))
+    mountain('RockySummit',0,-1080,360,180,116,(94,107,118))
+    mountain('IcePeak',1715,-1070,220,180,145,(183,210,223))
+    add('IcePeakSnowcap',(95,45,90),(1715,155,-1070),(239,248,255),class_name='WedgePart',material='Snow')
+    mountain('AmberMesa',445,1010,235,175,70,(191,130,91))
+    add('AmberMesaCap',(130,6,105),(445,84,1010),(226,164,99),material='Sand')
+    mountain('VolcanicCrater',1730,900,170,220,82,(73,61,72))
+    add('CraterCore',(95,78,105),(1730,51,900),(70,59,67),material='Basalt')
+    add('CraterLava',(105,3,115),(1730,91,900),(255,102,34),group='Hazards',material='Neon',kind='lava',collide=False)
+    for f in range(5):
+        add(f'LavaFissure{f}',(5,1,48),(1690+f*19,12.5,800+f*38),(255,116,36),group='Hazards',material='Neon',kind='lava',collide=False,rotation=(0,30-f*11,0))
+    for n,r in enumerate(protected_regions()[1:3]):
+        x,z=(r['MinX']+r['MaxX'])/2,(r['MinZ']+r['MaxZ'])/2
+        add(f'MarshPool{n}',(r['MaxX']-r['MinX'],.45,r['MaxZ']-r['MinZ']),(x,12.3,z),
+            (75,151,144),material='Glass',transparency=.25,collide=False,group='Hazards',kind='swamp')
+        for pad in range(9):
+            px,pz=x+rng.uniform(-70,70),z+rng.uniform(-40,40)
+            add(f'LilyPad{n}_{pad}',(.35,7,6),(px,12.7,pz),(107,162,110),shape='Cylinder',rotation=(0,0,90),collide=False)
+            add(f'LilyBloom{n}_{pad}',(2,1.1,2),(px,13.4,pz),(232,176,228),shape='Ball',collide=False)
+    add('RiverBed',(132,8,840),(1440,-12,0),(61,102,114),group='GroundTerrain',material='Rock')
+    add('RiverWater',(132,2,840),(1440,9,0),(67,168,192),group='Hazards',material='Glass',kind='water',collide=False,transparency=.25)
+    for r in range(24):
+        add(f'RiverRipple{r}',(rng.uniform(10,22),.1,1.4),(1440+rng.uniform(-48,48),10.04,-390+r*33),
+            (164,235,242),material='Neon',collide=False,transparency=.55,rotation=(0,-15,0))
+    for n in range(7):
+        # Cylinders useX as thickness. Width18 andspacing22 leave4studgap.
+        add(f'RiverStep{n}',(3,18,24),(1374+n*22,12.5,155),(113+n*4,129+n*3,137+n*3),
+            group='Crossings',material='Rock',shape='Cylinder',rotation=(0,0,90))
+    text('FreeCrossingSign',(1332,23,155),'ĐÁ BƯỚC · LỐI QUA MIỄN PHÍ','Nhảy qua đá · rơi xuống nước sẽ bị cuốn đi',width=360)
+    add('PaidBridgeDeck',(184,2,28),(1440,13,-205),(125,92,70),group='Crossings',material='WoodPlanks',kind='bridge')
+    for n in range(23):
+        add(f'BridgePlank{n}',(7.5,.35,27),(1352+n*8,14.2,-205),(156+n%3*8,115+n%3*5,78),group='Crossings',material='WoodPlanks')
+    for side in (-1,1):
+        add(f'BridgeRailing{side}',(184,1.2,1.2),(1440,18,-205+side*14),(101,78,65),group='Crossings',material='Wood')
+        for n in range(7):
+            add(f'BridgePost{side}_{n}',(2,7,2),(1354+n*28,16.5,-205+side*14),(112,82,64),group='Crossings',material='Wood')
+        x=1440+side*105
+        add(f'BridgeToll{side}',(6,9,4),(x,16.5,-218),(188,151,91),group='Travel',material='Wood',kind='bridge_toll',bridge='river_bridge',side=side,
+            prompt=dict(action='Qua cầu · 150 Coins',object='Cầu Thương Gia',distance=15))
+        text(f'BridgeSign{side}',(x,28,-211),'CẦU THƯƠNG GIA','150 Coins · đi an toàn qua sông',(255,221,145),300,75)
+    for t in config['Teleports']:
+        ident=t['Id'];x,y,z=t['Position']
+        add('PortalBase_'+ident,(26,2,26),(x,12,z),(97,109,124),group='Travel',material='Slate')
+        add('Teleport_'+ident,(17,.6,17),(x,13.4,z),(117,226,232),group='Travel',material='Neon',collide=False,
+            kind='teleport',id=ident,biome=t['Biome'],cost=250,prompt=dict(action='Dịch chuyển · 250 Coins',object='Cổng du hành',distance=16))
+        for side in (-1,1):
+            add(f'PortalPillar_{ident}_{side}',(3,18,3),(x+side*11,22,z),(166,184,197),group='Travel',material='Marble')
+            add(f'PortalRune_{ident}_{side}',(1.3,12,.2),(x+side*11,23,z-1.6),(129,240,232),group='Travel',material='Neon',collide=False)
+        add('PortalLintel_'+ident,(27,3,4),(x,32,z),(136,163,180),group='Travel',material='Marble')
+        text('PortalLabel_'+ident,(x,38,z),'CỔNG DU HÀNH','250 Coins · đến cổng tiếp theo',(163,244,247),300,75)
+    add('SpawnStoneCircle',(.7,37,37),(0,12.2,0),(164,190,155),group='GroundTerrain',shape='Cylinder',rotation=(0,0,90),material='Slate')
+    add('StartSpawn',(16,1,16),(0,13,0),(151,211,143),group='Travel',class_name='SpawnLocation',kind='spawn',material='Grass',transparency=.15)
+    for n in range(12):
+        a=n*math.pi/6
+        add(f'SpawnPetal{n}',(2,.2,3),(math.cos(a)*16,12.9,math.sin(a)*16),(230,241,203),collide=False,rotation=(0,-n*30,0))
+    text('WelcomeSign',(0,29,-24),'EVOLUTION WILDS','Ăn · khám phá 9 quần xã · tiến hóa tại 100% độ no',(239,249,209),480,92)
+    text('Instructions',(34,21,9),'THẾ GIỚI MỞ 360°','WASD di chuyển · Space nhảy · tìm thức ăn quanh bạn',(245,238,193),410,75)
+    # Split invisible boundaries stay within Roblox's 2048-stud part size limit.
+    # They prevent accidental falls into an unrendered void outside the landscape.
+    for side in (-1,1):
+        for section in range(4):
+            add(f'WorldBoundaryZ{side}_{section}',(1080,180,2),(-1620+section*1080,70,side*1260),
+                (0,0,0),group='Boundaries',transparency=1)
+        for section in range(2):
+            add(f'WorldBoundaryX{side}_{section}',(2,180,1260),(side*2160,70,-630+section*1260),
+                (0,0,0),group='Boundaries',transparency=1)
     return records
 
 
-def _lua(value):
-    if value is None:
-        return "nil"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, (list, tuple)):
-        return "{" + ",".join(_lua(v) for v in value) + "}"
-    return "{" + ",".join(f"{key}={_lua(v)}" for key, v in value.items()) + "}"
+def _lua(v):
+    if v is None:return 'nil'
+    if isinstance(v,bool):return 'true' if v else 'false'
+    if isinstance(v,(int,float)):return str(v)
+    if isinstance(v,str):return json.dumps(v,ensure_ascii=False)
+    if isinstance(v,(list,tuple)):return '{'+','.join(_lua(x) for x in v)+'}'
+    return '{'+','.join(f'{k}={_lua(x)}' for k,x in v.items())+'}'
 
 
-def write_layout(output: Path | None = None):
-    output = output or ROOT / "src/shared/WorldLayout.luau"
-    output.write_text("-- Generated by tools/world_assets.py. Edit the canonical descriptors, then rebuild.\nreturn {\n" +
-                      "\n".join(" " + _lua(record) + "," for record in descriptors()) + "\n}\n", encoding="utf-8")
+def write_layout(output=None,seed=SEED):
+    output=output or ROOT/'src/shared/WorldLayout.luau'
+    output.write_text('-- Generated by tools/world_assets.py. Edit the canonical descriptors, then rebuild.\nreturn {\n'+
+                      '\n'.join(' '+_lua(r)+',' for r in descriptors(seed))+'\n}\n',encoding='utf-8')
+    (ROOT/'src/shared/WorldConfig.luau').write_text('-- Generated map metadata. Distances use 1 stud = 0.28 metres.\nreturn '+_lua(world_config(seed))+'\n',encoding='utf-8')
     return output
 
-
-if __name__ == "__main__":
+if __name__=='__main__':
     print(write_layout())

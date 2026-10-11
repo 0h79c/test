@@ -17,10 +17,12 @@ class Animal:
         self.name, self.collision, self.parts = name, collision, []
 
     def add(self, name, size, pos, color, shape="Ball", rotation=(0, 0, 0),
-            motion="", phase=0, material="SmoothPlastic", class_name="Part"):
+            motion="", phase=0, material="SmoothPlastic", class_name="Part",
+            pivot=None, skin=None, transparency=0):
         self.parts.append(dict(name=name, size=size, position=pos, color=color,
                                shape=shape, rotation=rotation, motion=motion,
-                               phase=phase, material=material, class_name=class_name))
+                               phase=phase, material=material, class_name=class_name,
+                               pivot=pivot, skin=skin, transparency=transparency))
 
     def rod(self, name, start, end, width, color, motion="", phase=0):
         # Ellipsoids make soft, tapered cartoon limbs without imported meshes.
@@ -35,12 +37,47 @@ class Animal:
         self.add(name, (width, width, length + width / 2), midpoint, color,
                  rotation=(pitch, yaw, 0), motion=motion, phase=phase)
 
+    def triangle(self, name, vertices, color, motion="", phase=0, thickness=.10):
+        # A flat triangle requires the WedgePart's large Y/Z face, with its X
+        # axis as thickness. Flattening Y would leave a rectangular roof.
+        def sub(a,b): return tuple(a[i]-b[i] for i in range(3))
+        def dot(a,b): return sum(a[i]*b[i] for i in range(3))
+        def cross(a,b): return (a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0])
+        def norm(a):
+            mag=math.sqrt(dot(a,a))
+            return tuple(v/mag for v in a),mag
+        pairs=[(vertices[0],vertices[1],vertices[2]),(vertices[1],vertices[2],vertices[0]),(vertices[2],vertices[0],vertices[1])]
+        first,last,top=max(pairs,key=lambda row:dot(sub(row[0],row[1]),sub(row[0],row[1])))
+        baseline,length=norm(sub(last,first))
+        projection=dot(sub(top,first),baseline)
+        foot=tuple(first[i]+baseline[i]*projection for i in range(3))
+        yaxis,height=norm(sub(top,foot))
+        for endpoint in (first,last):
+            zaxis,depth=norm(sub(foot,endpoint))
+            if depth < 1e-5: continue
+            xaxis=cross(yaxis,zaxis)
+            # Convert this orthonormal basis to Roblox's Rx * Ry * Rz.
+            yaw=math.asin(max(-1,min(1,zaxis[0])))
+            if abs(math.cos(yaw)) < 1e-8:
+                pitch=math.atan2(yaxis[2],yaxis[1]);roll=0
+            else:
+                pitch=math.atan2(-zaxis[1],zaxis[2])
+                roll=math.atan2(-yaxis[0],xaxis[0])
+            center=tuple((endpoint[i]+foot[i]+top[i]-foot[i])/2 for i in range(3))
+            self.add(name,(thickness,height,depth),center,color,shape="Block",class_name="WedgePart",
+                     rotation=tuple(math.degrees(v) for v in (pitch,yaw,roll)),motion=motion,phase=phase)
+
     def eyes(self, x, y, z, size=.32, wide=False):
+        iris = {"Cat": (90, 165, 100), "Frog": (195, 155, 75),
+                "Phoenix": (217, 125, 62), "Cheetah": (174, 131, 66)}.get(self.name, (75, 121, 151))
         for side in (-1, 1):
             self.add("EyeWhite", (size, size * 1.15, size * .6), (side*x, y, z), WHITE)
-            self.add("Pupil", (size*.55, size*.72, size*.4), (side*x, y, z-size*.25), BLACK)
+            self.add("Iris", (size*.7, size*.84, size*.28), (side*x, y, z-size*.24), iris)
+            self.add("Pupil", (size*.38, size*.58, size*.18), (side*x, y, z-size*.38), BLACK)
             self.add("EyeSpark", (size*.19, size*.19, size*.13),
                      (side*x-size*.11, y+size*.19, z-size*.45), (255, 255, 255))
+            self.add("EyeSparkSmall", (size*.09, size*.09, size*.06),
+                     (side*x+size*.1, y-size*.12, z-size*.47), (239, 247, 252))
 
     def paws(self, body_color, x=.63, front=-1.1, back=.85, y=.65):
         for side in (-1, 1):
@@ -60,12 +97,16 @@ def _snail():
     a.add("Shell", (1.95, 2.0, 2.0), (0, 1.25, .45), shell)
     # Two visible spirals on the sides of the shell, actual geometry.
     for side in (-1, 1):
-        for step in range(23):
-            t = step / 22
+        previous = None
+        for step in range(49):
+            t = step / 48
             theta = t * math.pi * 3.7
             radius = .08 + t*.78
-            a.add("ShellSpiral", (.11, .16, .16),
-                  (side*.95, 1.25+math.sin(theta)*radius, .45+math.cos(theta)*radius), ridge)
+            point = (side*(.975*math.sqrt(1-radius*radius)+.025),
+                     1.25+math.sin(theta)*radius,.45+math.cos(theta)*radius)
+            if previous:
+                a.rod("ShellSpiral",previous,point,.068,ridge)
+            previous=point
         start, end = (side*.37, .93, -1.42), (side*.53, 1.72, -1.67)
         a.rod("EyeStalk", start, end, .12, skin)
         a.add("StalkEye", (.37, .37, .37), end, WHITE)
@@ -393,10 +434,17 @@ def _dragon():
             a.add("Paw",(.76,.35,.98),(side*.92,.2,z-.19),ivory,motion="Leg",phase=phase)
             for n in range(3): a.add("Claw",(.14,.16,.35),(side*.92+(n-1)*.19,.14,z-.7),gold,motion="Leg",phase=phase)
         a.rod("WingBone",(side*.83,2.54,.2),(side*3.51,3.24,.42),.21,ivory,"Wing",side)
-        a.add("WingMembrane",(2.61,.16,1.68),(side*2.14,2.83,.89),blue,rotation=(0,side*-11,side*14),class_name="WedgePart",shape="Block",motion="Wing",phase=side)
-        for n in range(4):
-            a.rod("WingFinger",(side*(1.04+n*.6),2.63+n*.13,.25),
-                  (side*(1.35+n*.65),2.62+n*.13,1.73+n*.06),.1,ivory,"Wing",side)
+        shoulder=(side*.83,2.54,.2)
+        outer=(side*3.51,3.24,.42)
+        trailing=[(side*3.3,3.08,1.91),(side*2.65,2.9,1.85),
+                  (side*2.0,2.75,1.79),(side*1.35,2.62,1.73)]
+        points=[outer]+trailing
+        for first,last in zip(points,points[1:]):
+            a.triangle("WingMembrane",(shoulder,first,last),blue,"Wing",side,.075)
+        for point in trailing:
+            a.rod("WingFinger",shoulder,point,.085,ivory,"Wing",side)
+        for first,last in zip(trailing,trailing[1:]):
+            a.rod("WingRim",first,last,.10,ivory,"Wing",side)
     for n in range(6):
         a.add("Spine",(.34,.53,.39),(0,2.64-n*.03,-.45+n*.41),blue,class_name="WedgePart",shape="Block")
     tail=((0,1.63,1.63),(.1,1.08,2.43),(.4,.92,3.15),(.73,1.14,3.69),(1,1.34,4.02))
@@ -405,9 +453,270 @@ def _dragon():
     return a
 
 
+HEADS = {
+    "Snail": (0, .84, -1.35), "Caterpillar": (0, .93, -1.73),
+    "Mouse": (0, 1.37, -1.02), "Frog": (0, 1.22, -.85),
+    "Turtle": (0, .91, -1.95), "Rabbit": (0, 1.79, -1.10),
+    "Cat": (0, 1.98, -1.06), "Hound": (0, 2.42, -1.45),
+    "Monkey": (0, 2.76, -.16), "Cheetah": (0, 2.62, -1.45),
+    "Kangaroo": (0, 3.42, -.65), "Gorilla": (0, 3.22, -.32),
+    "Pegasus": (0, 3.52, -1.67), "Phoenix": (0, 3.34, -.61),
+    "WhiteDragon": (0, 3.45, -1.57),
+}
+DETAIL_NAMES = {"Pupil", "Eye", "EyeWhite", "Iris", "EyeSpark", "EyeSparkSmall",
+                "Nose", "Nostril", "Smile", "Mouth", "TearMark", "Whisker"}
+PALE_NAMES = {"Belly", "Breast", "Chest", "ChestPlate", "BackSilver", "Muzzle",
+              "LongMuzzle", "Face", "EarInside", "EarPink", "Jaw", "ShellRim"}
+ACCENT_NAMES = {"Shell", "ShellScute", "ShellScuteSide", "Mane", "Horn", "HornTip",
+               "GoldHoof", "Spine", "TailFin", "CheekFin", "FlameCrest", "FeatherTip",
+               "GoldenFeatherTip", "FlameTail", "TailEmber", "Collar", "Tag", "Beak"}
+DARK_NAMES = {"Spot", "BackSpot", "TabbyStripe", "TailBand", "TailTip", "ShellSpiral"}
+
+
+def polish(animal):
+    """Hand-authored details, and joint pivots shared across connected anatomy.
+
+    Limbs/wings rotate at the shoulder, not at each feather's center. The little
+    face details deliberately remain natural colors under every mutation skin.
+    """
+    a = animal
+    if a.name == "Snail":
+        a.add("ShellLip", (1.91, .21, 1.75), (0, .58, .39), (235, 185, 111))
+        for side in (-1, 1):
+            a.add("Iris", (.27, .29, .11), (side*.53, 1.74, -1.84), (83, 143, 111))
+            a.add("EyeSpark", (.065, .065, .055), (side*.49, 1.8, -1.94), WHITE)
+            a.add("Cheek", (.21, .13, .09), (side*.31, .6, -1.75), (229, 165, 117))
+        for n in range(7):
+            a.add("FootRipple", (.5, .12, .32), ((-.83 if n%2 else .83), .16, -.94+n*.34),
+                  (132, 176, 91), motion="Segment", phase=n)
+    elif a.name == "Caterpillar":
+        for n in range(5):
+            a.add("DorsalPatch", (.75, .17, .54), (0, 1.27, -.94+n*.64),
+                  (197, 229, 119), motion="Segment", phase=n+1)
+        a.add("Smile", (.32, .052, .055), (0, .71, -2.14), (64, 106, 67))
+        for side in (-1, 1):
+            a.add("Cheek", (.24, .16, .1), (side*.48, .83, -2.02), (227, 173, 93))
+    elif a.name == "Mouse":
+        for side in (-1, 1):
+            a.add("Muzzle", (.48, .36, .3), (side*.18, .99, -1.56), (222, 224, 222))
+            a.add("FrontTooth", (.11, .19, .065), (side*.065, .83, -1.7), WHITE, shape="Block")
+            a.add("PawFinger", (.12, .07, .29), (side*.61, .08, -.95), (245, 188, 189), motion="Leg", phase=-side)
+        a.add("Mouth", (.18, .05, .06), (0, .88, -1.73), (119, 86, 89))
+    elif a.name == "Frog":
+        for side in (-1, 1):
+            a.add("WebbedFrontFoot", (.64, .1, .39), (side*1.09, .11, -1.34), (143, 205, 101), motion="Leg", phase=side)
+            a.add("WebbedBackFoot", (.78, .1, .42), (side*1.18, .12, 1.01), (143, 205, 101), motion="Leg", phase=-side)
+            for n in range(4):
+                a.add("DorsalFreckle", (.18, .095, .21), (side*.56, 1.44, -.05+n*.3), (37, 127, 87))
+    elif a.name == "Turtle":
+        for side in (-1, 1):
+            for n in range(4):
+                a.add("ShellEdgeScale", (.5, .16, .55), (side*1.13, .96, -.95+n*.73), (151, 171, 98))
+            a.add("Cheek", (.18, .13, .07), (side*.29, .81, -2.36), (193, 196, 99))
+        a.add("Mouth", (.37, .045, .07), (0, .72, -2.36), (87, 122, 73))
+    elif a.name in ("Rabbit", "Cat"):
+        hx, hy, hz = HEADS[a.name]
+        for side in (-1, 1):
+            a.rod("Mouth", (0,hy-.46,hz-.8), (side*.15,hy-.51,hz-.75), .04, (123, 100, 97))
+            if a.name == "Rabbit":
+                for n in range(3):
+                    a.rod("Whisker", (side*.3,1.32,-1.65), (side*.95,1.32+(n-1)*.14,-1.72), .025, (172, 159, 149))
+            else:
+                for n in range(3):
+                    a.add("ForeheadStripe", (.08, .25, .07), ((n-1)*.19,2.26,-1.48), (149,86,47), rotation=(0,0,(n-1)*-13))
+    elif a.name == "Hound":
+        a.add("Mouth", (.61, .075, .55), (0, 1.77, -2.22), (101, 72, 63))
+        a.add("Tongue", (.25, .1, .35), (0, 1.71, -2.4), (229, 149, 154))
+        for side in (-1, 1):
+            for z in (-.97, 1.14):
+                a.add("Sock", (.52, .35, .56), (side*.61, .37, z), (238, 232, 216), motion="Leg", phase=side if z<0 else -side)
+    elif a.name == "Monkey":
+        a.add("Smile", (.46, .075, .065), (0, 2.12, -1.19), (123, 88, 64))
+        a.add("BellyButton", (.14, .15, .06), (0, 1.21, -.67), (164, 123, 93))
+        for side in (-1, 1):
+            for n in range(3):
+                a.add("Finger", (.12, .3, .15), (side*1.14+(n-1)*.13, .4, -.61), (207, 162, 119), motion="Leg", phase=side)
+        for n in range(3):
+            a.add("HairTuft", (.19, .35, .31), ((n-1)*.18, 3.22+(.08 if n==1 else 0), -.17), (116,75,50), rotation=(0,0,(n-1)*14))
+    elif a.name == "Cheetah":
+        # Lay the coat spots directly onto the ellipsoid; floating patches at
+        # the old fixed side coordinate were especially visible in daylight.
+        for p in a.parts:
+            if p["name"] == "Spot":
+                x, y, z = p["position"]
+                radial = max(.09, 1-((y-1.71)/.59)**2-((z-.19)/1.425)**2)
+                p["position"] = (math.copysign(.67*math.sqrt(radial)+.025,x), y, z)
+                p["size"] = (.08, p["size"][1], p["size"][2])
+        a.add("Mouth", (.38, .045, .075), (0, 2.09, -2.14), (113,91,66))
+        for side in (-1, 1):
+            a.add("Shoulder", (.55, .83, .78), (side*.43, 1.78, -.98), gold := (232,190,84))
+    elif a.name == "Kangaroo":
+        a.add("Mouth", (.32, .05, .12), (0, 2.9, -1.62), (117,82,61))
+        for side in (-1, 1):
+            a.add("ToeDetail", (.29, .07, .3), (side*.69, .19, -.76), (123,95,77), motion="Leg", phase=-side)
+            a.add("Cheek", (.22, .2, .13), (side*.4, 3.08, -1.08), (224,184,143))
+    elif a.name == "Gorilla":
+        a.add("Mouth", (.61, .06, .085), (0, 2.48, -1.47), (55,62,72))
+        for side in (-1, 1):
+            a.add("Temple", (.31, .59, .46), (side*.57, 2.93, -.87), (78,83,94))
+            a.add("Nostril", (.12, .09, .06), (side*.14, 2.83, -1.58), (30,34,44))
+    elif a.name == "Pegasus":
+        for side in (-1, 1):
+            a.add("Iris", (.055, .18, .15), (side*.56, 3.5, -1.96), (87,155,177))
+            a.add("EyeSpark", (.05, .05, .055), (side*.59, 3.55, -2), WHITE)
+            a.add("EarInside", (.11, .44, .11), (side*.32, 4.05, -1.57), (206,190,216))
+            for z in (-.9, 1.21):
+                a.add("HoofRim", (.51, .08, .67), (side*.62, .33, z), (245,222,161), motion="Leg", phase=side if z<0 else -side, material="Metal")
+        a.add("Forelock", (.57, .65, .39), (0, 3.83, -1.89), (163,139,211), rotation=(-18,0,0))
+    elif a.name == "Phoenix":
+        for side in (-1, 1):
+            for n in range(5):
+                a.add("BreastFeather", (.25, .39, .11), (side*(.13+(n%2)*.24), 1.41+(n//2)*.3, -.99), (254,194,88), rotation=(0,0,side*15))
+        a.add("BeakSeam", (.35, .035, .47), (0, 2.92, -1.41), (190,128,55), shape="Block")
+    elif a.name == "WhiteDragon":
+        for side in (-1, 1):
+            a.add("Iris", (.07, .2, .27), (side*.79, 3.33, -1.93), (83, 177, 192))
+            a.add("EyeSpark", (.065, .075, .06), (side*.84, 3.41, -1.98), WHITE)
+            for n in range(5):
+                a.add("SideScale", (.14, .34, .32), (side*1.08, 1.89, -.62+n*.45), (179,220,231), rotation=(0,side*10,side*-15))
+        for n in range(5):
+            a.add("BellyPlate", (.93-n*.06, .14, .19), (0, 1.05+n*.24, -1.22+n*.025), (183,222,233))
+
+    if a.name == "Cat":
+        a.parts = [p for p in a.parts if p["name"] != "TabbyStripe"]
+        for side in (-1,1):
+            for stripe in range(3):
+                z=.95-stripe*.55
+                previous=None
+                for n in range(6):
+                    y=1.04+n*.11
+                    radial=max(.04,1-((y-1.17)/.71)**2-((z-.22)/1.17)**2)
+                    point=(side*(.82*math.sqrt(radial)+.023),y,z)
+                    if previous: a.rod("TabbyStripe",previous,point,.07,(149,86,47))
+                    previous=point
+    # Surface details are embossed onto their underlying ellipsoid. A fixed
+    # side coordinate makes them float when the body curves away underneath.
+    for p in a.parts:
+        x,y,z=p["position"]
+        if a.name == "Turtle" and p["name"] == "ShellScuteSide":
+            radial=max(.08,1-((y-1.17)/.86)**2-((z-.2)/1.525)**2)
+            p["position"]=(math.copysign(1.46*math.sqrt(radial)+.016,x),y,z)
+            p["size"]=(.09,.35,.5)
+        elif a.name == "Turtle" and p["name"] == "ShellScute":
+            top_y=1.17+.86*math.sqrt(max(.05,1-((z-.2)/1.525)**2))
+            p["position"]=(x,top_y+.015,z)
+            p["size"]=(.9,.095,.58)
+        elif a.name == "Turtle" and p["name"] == "ShellEdgeScale":
+            radial=max(.08,1-((z-.18)/1.6)**2)
+            p["position"]=(math.copysign(1.54*math.sqrt(radial)*.82,x),.89,z)
+            p["size"]=(.4,.12,.47)
+        elif a.name == "Cheetah" and p["name"] == "BackSpot":
+            radial=max(.05,1-(x/.67)**2-((z-.19)/1.425)**2)
+            p["position"]=(x,1.71+.59*math.sqrt(radial)+.02,z)
+        elif a.name == "WhiteDragon" and p["name"] == "SideScale":
+            radial=max(.07,1-((y-1.64)/.93)**2-((z-.32)/1.425)**2)
+            p["position"]=(math.copysign(1.16*math.sqrt(radial)+.015,x),y,z)
+            p["size"]=(.09,.28,.27)
+        elif a.name == "WhiteDragon" and p["name"] == "Spine":
+            radial=max(.05,1-((z-.32)/1.425)**2)
+            p["position"]=(x,1.64+.93*math.sqrt(radial)+.19,z)
+
+    for p in a.parts:
+        name, (x, y, z) = p["name"], p["position"]
+        p["skin"] = p["skin"] or ("Detail" if name in DETAIL_NAMES else "Light" if name in PALE_NAMES
+                                     else "Accent" if name in ACCENT_NAMES else "Dark" if name in DARK_NAMES else "Body")
+        if p["motion"] == "Wing":
+            p["pivot"] = (math.copysign(.78,x), 2.2 if a.name!="WhiteDragon" else 2.54, .15)
+        elif p["motion"] == "Tail":
+            # A single shared anchor prevents the tail's rods drifting apart.
+            first = next(q for q in a.parts if q["motion"] == "Tail")
+            p["pivot"] = first["position"]
+        elif p["motion"] == "Leg":
+            p["pivot"] = (x, max(.35, a.collision[1]*.57), z)
+            # Match foot details to the same hip pivot for that gait phase.
+            p["pivot"] = (math.copysign(a.collision[0]*.29,x), max(.35,a.collision[1]*.57),
+                          -.78 if (p["phase"]*x)<0 else .82)
+        elif p["motion"] == "Segment":
+            p["pivot"] = p["position"]
+        elif name in DETAIL_NAMES or name in {"Head", "HorseHead", "Snout", "Jaw", "Face", "Muzzle", "LongMuzzle",
+                "RoundEar", "EarInside", "LongEar", "PointEar", "EarPink", "FloppyEar", "EyeBulge", "StalkEye",
+                "EyeStalk", "Feeler", "Antenna", "AntennaTip", "Horn", "HornTip", "CheekFin", "FlameCrest", "Cheek",
+                "FrontTooth", "Beak", "BeakSeam", "Brow", "EyeBrow", "Forelock", "HairTuft", "Temple", "ForeheadStripe"}:
+            p["motion"], p["pivot"] = "Head", HEADS[a.name]
+    return a
+
+
 def get_models():
-    return [factory() for factory in (_snail,_caterpillar,_mouse,_frog,_turtle,
+    return [polish(factory()) for factory in (_snail,_caterpillar,_mouse,_frog,_turtle,
             _rabbit,_cat,_hound,_monkey,_cheetah,_kangaroo,_gorilla,_pegasus,_phoenix,_dragon)]
+
+
+def mutation_geometry(animal):
+    """Original, species-sized appendages for all four nonstandard skins."""
+    head = HEADS[animal.name]
+    top = max(p["position"][1]+p["size"][1]/2 for p in animal.parts
+              if p["name"] not in {"LongEar", "EarInside", "EyeStalk", "StalkEye", "Antenna", "AntennaTip", "Horn", "HornTip"})
+    width, height, length = animal.collision
+    top = min(top, head[1]+.62)
+    variants = {}
+    for variant in ("Giant", "Tiny", "Radioactive", "Awakened"):
+        a = Animal(variant, animal.collision)
+        if variant == "Giant":
+            for side in (-1, 1):
+                start = (side*width*.2, top-.13, head[2]+.18)
+                bend = (side*width*.28, top+.23, head[2]+.36)
+                tip = (side*width*.3, top+.53, head[2]+.22)
+                a.rod("TitanHorn", start, bend, .2, (224,174,93))
+                a.rod("TitanHornTip", bend, tip, .12, (250,216,141))
+            for n in range(3):
+                a.add("TitanCrest", (.23,.35,.41), (0,height*.93,-.12+n*.37), (215,167,93),
+                      class_name="WedgePart", shape="Block", rotation=(-10,0,0))
+        elif variant == "Tiny":
+            for side in (-1, 1):
+                for n in range(3):
+                    a.add("FaerieFrill", (.2,.43+n*.06,.19),
+                          (side*(width*.28+n*.06),head[1]-.12+n*.14,head[2]+.18),
+                          (245,176,215), rotation=(0,side*12,side*-(28+n*13)))
+            a.add("FaerieGem", (.15,.24,.12), (0,top-.19,head[2]-.4), (206,232,253), material="Neon")
+        elif variant == "Radioactive":
+            for side in (-1, 1):
+                for n in range(3):
+                    a.add("BiolumeCrystal", (.23,.49+n*.13,.25),
+                          (side*width*(.27+n*.04),height*.87+.11+n*.075,.1+n*.34),
+                          (84,244,202), shape="Block", class_name="WedgePart", rotation=(-12,side*20,side*-(18+n*11)), material="Neon")
+                    a.add("CrystalSocket", (.37,.17,.34),
+                          (side*width*(.27+n*.04),height*.79,.1+n*.34), (54,105,113))
+            for n in range(4):
+                a.add("LuminousSpine", (.19,.25,.3), (0,height*.95,.08+n*.35), (170,255,211),
+                      shape="Block", class_name="WedgePart", material="Neon")
+        else:
+            for n in range(5):
+                a.add("CelestialCrown", (.13,.33+(.15 if n==2 else 0),.15),
+                      ((n-2)*.16,top+.13+(.075 if n==2 else 0),head[2]+.05), (241,204,119),
+                      class_name="WedgePart", shape="Block", rotation=(0,0,(n-2)*-8), material="Metal")
+            a.add("CrownSapphire", (.18,.23,.1), (0,top+.17,head[2]-.04), (92,214,231), material="Neon")
+            # Winglets attach at the shoulders, and share the main wing hinges
+            # where the species already flies. They never change collisions.
+            for side in (-1, 1):
+                for n in range(4):
+                    a.add("CelestialWinglet", (.23,.14,.75-n*.055),
+                          (side*(width*.37+n*.17),height*.73+n*.075,.5+n*.045), (239,225,175),
+                          rotation=(0,side*(12+n*9),side*17), motion="Wing", phase=side,
+                          pivot=(side*width*.35,height*.73,.2))
+            for n in range(18):
+                angle = n*math.tau/18
+                radius = width*.32+.16
+                a.add("CelestialHalo", (.08,.08,radius*.42),
+                      (math.sin(angle)*radius,top+.63,head[2]+math.cos(angle)*radius), (247,218,151),
+                      shape="Block", rotation=(0,math.degrees(angle)+90,0), material="Neon", motion="Halo", phase=n,
+                      pivot=(0,top+.63,head[2]), transparency=.15)
+        for p in a.parts:
+            p["skin"] = "Mutation"
+            if not p["motion"]:
+                p["motion"], p["pivot"] = ("Head", head) if p["name"] in {
+                    "TitanHorn", "TitanHornTip", "FaerieFrill", "FaerieGem", "CelestialCrown", "CrownSapphire"} else ("", None)
+        variants[variant] = a.parts
+    return variants
 
 
 def _emit_model(parent,item,part,animal,name=None,scale=1,origin=(0,0,0)):
@@ -438,6 +747,8 @@ def build_exhibits(parent,item,part):
 
 
 def _luau(value):
+    if value is None:
+        return "nil"
     if isinstance(value,dict):
         return "{"+",".join(f"[{json.dumps(k)}]={_luau(v)}" for k,v in value.items())+"}"
     if isinstance(value,(list,tuple)):
@@ -446,77 +757,12 @@ def _luau(value):
 
 
 def generate_luau():
-    models=get_models()
-    definitions=[dict(Name=a.name,Collider=a.collision,Parts=a.parts) for a in models]
-    source='''-- Generated by tools/model_assets.py; edit canonical geometry there.
--- All fifteen original models use Roblox primitives, with no asset permissions.
-local AnimalModels = {}
-AnimalModels.Definitions = {
-'''+",\n".join(" "+_luau(d) for d in definitions)+'''
-}
-
-function AnimalModels.Create(form, parent)
- local definition = AnimalModels.Definitions[form] or AnimalModels.Definitions[1]
- local model = Instance.new("Model")
- model.Name = definition.Name
- local root = Instance.new("Part")
- root.Name = "Root"
- root.Size = Vector3.new(0.2, 0.2, 0.2)
- root.Transparency = 1
- root.Anchored = true
- root.CanCollide = false
- root.CanTouch = false
- root.CanQuery = false
- root.Parent = model
- model.PrimaryPart = root
- for _, description in ipairs(definition.Parts) do
-  local part = Instance.new(description.class_name)
-  part.Name = description.name
-  part.Size = Vector3.new(table.unpack(description.size))
-  local rotation = description.rotation
-  part.CFrame = CFrame.new(table.unpack(description.position))
-   * CFrame.Angles(math.rad(rotation[1]), math.rad(rotation[2]), math.rad(rotation[3]))
-  part.Color = Color3.fromRGB(table.unpack(description.color))
-  part.Material = Enum.Material[description.material]
-  if part:IsA("Part") then part.Shape = Enum.PartType[description.shape] end
-  part.Anchored = true
-  part.CanCollide = false
-  part.CanTouch = false
-  part.CanQuery = false
-  part.Massless = true
-  if description.motion ~= "" then
-   part:SetAttribute("Motion", description.motion)
-   part:SetAttribute("Phase", description.phase)
-  end
-  part.Parent = model
- end
- model.Parent = parent
- return model
-end
-
-function AnimalModels.PopulateLibrary(parent)
- for form, definition in ipairs(AnimalModels.Definitions) do
-  if not parent:FindFirstChild(definition.Name) then AnimalModels.Create(form, parent) end
- end
-end
-
-function AnimalModels.EnsureLibrary()
- local storage = game:GetService("ReplicatedStorage")
- local folder = storage:FindFirstChild("SpeciesModels")
- if not folder then
-  folder = Instance.new("Folder")
-  folder.Name = "SpeciesModels"
-  folder.Parent = storage
- end
- AnimalModels.PopulateLibrary(folder)
- return folder
-end
-
--- Build also works without a parent, for ViewportFrame previews.
-AnimalModels.Build = AnimalModels.Create
-
-return AnimalModels
-'''
+    models = get_models()
+    definitions = [dict(Name=a.name, Collider=a.collision, Parts=a.parts) for a in models]
+    variants = [mutation_geometry(a) for a in models]
+    template = (ROOT/"tools/model_runtime.luau").read_text(encoding="utf-8")
+    source = template.replace("@@DEFINITIONS@@", ",\n".join(" "+_luau(d) for d in definitions))
+    source = source.replace("@@VARIANTS@@", ",\n".join(" "+_luau(d) for d in variants))
     (ROOT/"src/shared/AnimalModels.luau").write_text(source,encoding="utf-8")
     return models
 
