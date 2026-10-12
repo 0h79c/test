@@ -157,14 +157,13 @@ function Character.Apply(player, data)
  local buffSpeed = multiplier(buffModifiers.Speed, Config.Buffs.SpeedMultiplier)
  local buffScale = multiplier(buffModifiers.Scale, Config.Buffs.GiantScale)
 
- disconnect(character)
- for _, name in ipairs({"AnimalVisual", "AnimalCollider", "GlideForce", "GlideAttachment", "AuraAttachment"}) do
-  local old = character:FindFirstChild(name, true)
-  if old then old:Destroy() end
- end
-
  -- Preserve the Roblox control rig for both R6 and R15. Only the single
  -- collider touches the world; decorative geometry never blocks jumps.
+ -- Appearance loading must not resize the hidden rig after its floor probe
+ -- and animal feet have been aligned.
+ humanoid.AutomaticScalingEnabled = false
+ root.RootPriority = 127
+ root.Massless = false
  humanoid.UseJumpPower = true
  humanoid.WalkSpeed = species.WalkSpeed * mutation.Speed * buffSpeed
  humanoid.JumpPower = species.JumpPower * mutation.Jump
@@ -188,25 +187,49 @@ function Character.Apply(player, data)
  -- position while moving the intact control rig up or down, including a
  -- respawn with an active potion. This does not add velocity on morphing.
  local groundHeight = math.max(baseGroundHeight, colliderSize.Y / 2)
- local previousGroundHeight = character:GetAttribute("AnimalGroundHeight") or baseGroundHeight
+ local clearance = math.min(0.2, 0.08 * math.max(1, scale))
+ local previousState = active[character]
  humanoid.HipHeight = groundHeight - root.Size.Y / 2 - legHeight
+ humanoid.CameraOffset = Vector3.new(0,-groundHeight+math.max(.7,colliderSize.Y*.6),0)
+ character:SetAttribute("BuffSpeed", buffSpeed > 1)
+ -- AppearanceLoaded and speed-only potion changes are frequent refreshes.
+ -- Keep the live assembly and its ownership intact when geometry is unchanged.
+ if previousState and previousState.Form == form and previousState.Mutation == mutation.Name
+  and previousState.BuffScale == buffScale and previousState.GroundHeight == groundHeight
+  and previousState.Visual == character:FindFirstChild("AnimalVisual")
+  and previousState.Collider == character:FindFirstChild("AnimalCollider") then
+  return true
+ end
+ local ownerKnown, previousOwner = false, nil
+ if previousState then
+  ownerKnown, previousOwner = pcall(function() return root:GetNetworkOwner() end)
+ end
+ disconnect(character)
+ for _, name in ipairs({"AnimalVisual", "AnimalCollider", "GlideForce", "GlideAttachment", "AuraAttachment"}) do
+  local old = character:FindFirstChild(name, true)
+  if old then old:Destroy() end
+ end
+ local previousGroundHeight = character:GetAttribute("AnimalGroundHeight") or baseGroundHeight
  if math.abs(groundHeight - previousGroundHeight) > 0.001 then
   local velocity = root.AssemblyLinearVelocity
   root.CFrame = root.CFrame + Vector3.new(0, groundHeight - previousGroundHeight, 0)
   root.AssemblyLinearVelocity = velocity
  end
- humanoid.CameraOffset = Vector3.new(0,-groundHeight+math.max(.7,colliderSize.Y*.6),0)
  local collider = Instance.new("Part")
  collider.Name = "AnimalCollider"
+ collider.Shape = Enum.PartType.Ball
  collider.Size = colliderSize
+ collider.Anchored = false
  collider.Transparency = 1
  collider.CanCollide = true
  collider.CanTouch = true
  collider.CanQuery = true
  collider.CollisionGroup = "Default"
  collider.Massless = true
- collider.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.35, 0, 1, 1)
- collider.CFrame = root.CFrame * CFrame.new(0, -groundHeight + colliderSize.Y / 2, 0)
+ -- A rounded, low-friction contact shape clears the controller's standing
+ -- plane slightly, so landing and floor seams cannot pin a flat leading edge.
+ collider.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.05, 0, 100, 100)
+ collider.CFrame = root.CFrame * CFrame.new(0, -groundHeight + colliderSize.Y / 2 + clearance, 0)
  collider.Parent = character
  local colliderWeld = Instance.new("WeldConstraint")
  colliderWeld.Part0 = root
@@ -220,8 +243,13 @@ function Character.Apply(player, data)
  decorateAura(visual,definition,mutation,palette)
  visual:ScaleTo(scale)
  visual:PivotTo(root.CFrame * CFrame.new(0, -groundHeight, 0))
- visual.Parent = character
  AnimalModels.Rig(visual,root)
+ visual.Parent = character
+ -- Assign only after the complete unanchored rig is connected. A morph during
+ -- a PvP push preserves the temporary server ownership, including nil.
+ pcall(function()
+  if ownerKnown then root:SetNetworkOwner(previousOwner) else root:SetNetworkOwner(player) end
+ end)
 
  local nameplate = Instance.new("BillboardGui")
  nameplate.Name = "SpeciesNameplate"
@@ -266,7 +294,8 @@ function Character.Apply(player, data)
   glideForce.Parent = root
  end
 
- local state = {Connections={}}
+ local state = {Connections={}, Form=form, Mutation=mutation.Name, BuffScale=buffScale,
+  GroundHeight=groundHeight, Visual=visual, Collider=collider}
  active[character] = state
  table.insert(state.Connections, character.DescendantAdded:Connect(function(instance)
   hideAvatar(instance, character)
@@ -293,6 +322,7 @@ function Character.Apply(player, data)
  character:SetAttribute("MorphReady", true)
  character:SetAttribute("VisualScale", scale)
  character:SetAttribute("AnimalGroundHeight", groundHeight)
+ character:SetAttribute("AnimalFloorClearance", clearance)
  character:SetAttribute("BuffGiant", buffScale > 1)
  character:SetAttribute("BuffSpeed", buffSpeed > 1)
  return true

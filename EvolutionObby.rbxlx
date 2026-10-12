@@ -203721,23 +203721,30 @@ end
 function AnimalModels.Rig(model, root)
  local modelRoot = model.PrimaryPart
  local scale = model:GetScale()
+ local parts = {}
  local joints = {}
  for _, part in ipairs(model:GetDescendants()) do
   if not part:IsA("BasePart") or part == root then continue end
-  local pivot = part:GetAttribute("MotionPivot")
-  local hinge = pivot and modelRoot.CFrame * CFrame.new(pivot * scale) or part.CFrame
-  local joint = Instance.new("Motor6D")
-  joint.Name = "AnimalJoint"
-  joint.Part0 = root
-  joint.Part1 = part
-  joint.C0 = root.CFrame:ToObjectSpace(hinge)
-  joint.C1 = part.CFrame:ToObjectSpace(hinge)
-  joint.Parent = part
+  -- Complete this for the entire visual before connecting any live assembly.
+  -- Joining even one anchored decoration can temporarily anchor the character
+  -- and reset its physics ownership while a morph or respawn is replicating.
   part.Anchored = false
   part.CanCollide = false
   part.CanTouch = false
   part.CanQuery = false
   part.Massless = true
+  table.insert(parts,part)
+ end
+ for _, part in ipairs(parts) do
+  local pivot = part:GetAttribute("MotionPivot")
+  local hinge = pivot and modelRoot.CFrame * CFrame.new(pivot * scale) or part.CFrame
+  local joint = Instance.new("Motor6D")
+  joint.Name = "AnimalJoint"
+  joint.C0 = root.CFrame:ToObjectSpace(hinge)
+  joint.C1 = part.CFrame:ToObjectSpace(hinge)
+  joint.Part0 = root
+  joint.Part1 = part
+  joint.Parent = part
   table.insert(joints,AnimalModels.DescribeJoint(joint))
  end
  return joints
@@ -249653,14 +249660,13 @@ function Character.Apply(player, data)
  local buffSpeed = multiplier(buffModifiers.Speed, Config.Buffs.SpeedMultiplier)
  local buffScale = multiplier(buffModifiers.Scale, Config.Buffs.GiantScale)
 
- disconnect(character)
- for _, name in ipairs({"AnimalVisual", "AnimalCollider", "GlideForce", "GlideAttachment", "AuraAttachment"}) do
-  local old = character:FindFirstChild(name, true)
-  if old then old:Destroy() end
- end
-
  -- Preserve the Roblox control rig for both R6 and R15. Only the single
  -- collider touches the world; decorative geometry never blocks jumps.
+ -- Appearance loading must not resize the hidden rig after its floor probe
+ -- and animal feet have been aligned.
+ humanoid.AutomaticScalingEnabled = false
+ root.RootPriority = 127
+ root.Massless = false
  humanoid.UseJumpPower = true
  humanoid.WalkSpeed = species.WalkSpeed * mutation.Speed * buffSpeed
  humanoid.JumpPower = species.JumpPower * mutation.Jump
@@ -249684,25 +249690,49 @@ function Character.Apply(player, data)
  -- position while moving the intact control rig up or down, including a
  -- respawn with an active potion. This does not add velocity on morphing.
  local groundHeight = math.max(baseGroundHeight, colliderSize.Y / 2)
- local previousGroundHeight = character:GetAttribute("AnimalGroundHeight") or baseGroundHeight
+ local clearance = math.min(0.2, 0.08 * math.max(1, scale))
+ local previousState = active[character]
  humanoid.HipHeight = groundHeight - root.Size.Y / 2 - legHeight
+ humanoid.CameraOffset = Vector3.new(0,-groundHeight+math.max(.7,colliderSize.Y*.6),0)
+ character:SetAttribute("BuffSpeed", buffSpeed &gt; 1)
+ -- AppearanceLoaded and speed-only potion changes are frequent refreshes.
+ -- Keep the live assembly and its ownership intact when geometry is unchanged.
+ if previousState and previousState.Form == form and previousState.Mutation == mutation.Name
+  and previousState.BuffScale == buffScale and previousState.GroundHeight == groundHeight
+  and previousState.Visual == character:FindFirstChild("AnimalVisual")
+  and previousState.Collider == character:FindFirstChild("AnimalCollider") then
+  return true
+ end
+ local ownerKnown, previousOwner = false, nil
+ if previousState then
+  ownerKnown, previousOwner = pcall(function() return root:GetNetworkOwner() end)
+ end
+ disconnect(character)
+ for _, name in ipairs({"AnimalVisual", "AnimalCollider", "GlideForce", "GlideAttachment", "AuraAttachment"}) do
+  local old = character:FindFirstChild(name, true)
+  if old then old:Destroy() end
+ end
+ local previousGroundHeight = character:GetAttribute("AnimalGroundHeight") or baseGroundHeight
  if math.abs(groundHeight - previousGroundHeight) &gt; 0.001 then
   local velocity = root.AssemblyLinearVelocity
   root.CFrame = root.CFrame + Vector3.new(0, groundHeight - previousGroundHeight, 0)
   root.AssemblyLinearVelocity = velocity
  end
- humanoid.CameraOffset = Vector3.new(0,-groundHeight+math.max(.7,colliderSize.Y*.6),0)
  local collider = Instance.new("Part")
  collider.Name = "AnimalCollider"
+ collider.Shape = Enum.PartType.Ball
  collider.Size = colliderSize
+ collider.Anchored = false
  collider.Transparency = 1
  collider.CanCollide = true
  collider.CanTouch = true
  collider.CanQuery = true
  collider.CollisionGroup = "Default"
  collider.Massless = true
- collider.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.35, 0, 1, 1)
- collider.CFrame = root.CFrame * CFrame.new(0, -groundHeight + colliderSize.Y / 2, 0)
+ -- A rounded, low-friction contact shape clears the controller's standing
+ -- plane slightly, so landing and floor seams cannot pin a flat leading edge.
+ collider.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.05, 0, 100, 100)
+ collider.CFrame = root.CFrame * CFrame.new(0, -groundHeight + colliderSize.Y / 2 + clearance, 0)
  collider.Parent = character
  local colliderWeld = Instance.new("WeldConstraint")
  colliderWeld.Part0 = root
@@ -249716,8 +249746,13 @@ function Character.Apply(player, data)
  decorateAura(visual,definition,mutation,palette)
  visual:ScaleTo(scale)
  visual:PivotTo(root.CFrame * CFrame.new(0, -groundHeight, 0))
- visual.Parent = character
  AnimalModels.Rig(visual,root)
+ visual.Parent = character
+ -- Assign only after the complete unanchored rig is connected. A morph during
+ -- a PvP push preserves the temporary server ownership, including nil.
+ pcall(function()
+  if ownerKnown then root:SetNetworkOwner(previousOwner) else root:SetNetworkOwner(player) end
+ end)
 
  local nameplate = Instance.new("BillboardGui")
  nameplate.Name = "SpeciesNameplate"
@@ -249762,7 +249797,8 @@ function Character.Apply(player, data)
   glideForce.Parent = root
  end
 
- local state = {Connections={}}
+ local state = {Connections={}, Form=form, Mutation=mutation.Name, BuffScale=buffScale,
+  GroundHeight=groundHeight, Visual=visual, Collider=collider}
  active[character] = state
  table.insert(state.Connections, character.DescendantAdded:Connect(function(instance)
   hideAvatar(instance, character)
@@ -249789,6 +249825,7 @@ function Character.Apply(player, data)
  character:SetAttribute("MorphReady", true)
  character:SetAttribute("VisualScale", scale)
  character:SetAttribute("AnimalGroundHeight", groundHeight)
+ character:SetAttribute("AnimalFloorClearance", clearance)
  character:SetAttribute("BuffGiant", buffScale &gt; 1)
  character:SetAttribute("BuffSpeed", buffSpeed &gt; 1)
  return true
@@ -251307,7 +251344,23 @@ local function addPlayer(player)
  local function spawn()
   if spawning or not player.Parent or not profiles[player] then return end
   spawning=true
-  local ok,err=pcall(function() player:LoadCharacterAsync() end)
+  local ok,err=pcall(function()
+   -- A same-biome respawn can be beyond the client's streamed region. Request
+   -- that ground before creating the new, freely controlled character. Never
+   -- anchor a live character or disable its controls while waiting for terrain.
+   if workspace.StreamingEnabled then
+    local destination=data.NextSpawn or World.StartSpawn
+    pcall(function() player:RequestStreamAroundAsync(destination.Position,3) end)
+    if profiles[player]~=data or not player.Parent then return end
+    -- The initial profile may finish loading during the streaming request.
+    local latest=data.NextSpawn or World.StartSpawn
+    if (latest.Position-destination.Position).Magnitude&gt;1 then
+     pcall(function() player:RequestStreamAroundAsync(latest.Position,3) end)
+    end
+   end
+   if profiles[player]~=data or not player.Parent then return end
+   player:LoadCharacterAsync()
+  end)
   spawning=false
   if not ok then warn("Evolution spawn failed",player.UserId,err) end
  end

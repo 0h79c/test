@@ -56,6 +56,14 @@ return function(configSource, modelSource, characterSource)
  end
  instanceMeta.__newindex=function(obj,key,value)
   if key=="Parent" then
+   if value and obj.Name=="AnimalVisual" then
+    for _,part in ipairs(obj:GetDescendants()) do
+     if part:IsA("BasePart") then
+      assert(not part.Anchored,"An anchored visual entered the live character")
+      assert(part.AnimalJoint,"Visual entered the live character before rigging completed")
+     end
+    end
+   end
    local old=obj._p.Parent
    if old then
     local index=table.find(old._children,obj)
@@ -73,6 +81,9 @@ return function(configSource, modelSource, characterSource)
    end
    obj.AncestryChanged:Fire(obj,value)
   else
+   if obj.ClassName=="Motor6D" and key=="Part1" and value and obj.Part0 and obj.Part0.Name=="HumanoidRootPart" then
+    assert(not value.Anchored,"An anchored visual was joined to the humanoid assembly")
+   end
    obj._p[key]=value
   end
  end
@@ -141,6 +152,14 @@ return function(configSource, modelSource, characterSource)
   return vector(10,high-low,10)
  end
  function methods:GetState() return self.State end
+ function methods:GetNetworkOwner() return self.NetworkOwner end
+ function methods:SetNetworkOwner(owner)
+  self.NetworkOwner=owner
+  self.NetworkOwnershipWrites=(self.NetworkOwnershipWrites or 0)+1
+  for _,part in ipairs(self.Parent:GetDescendants()) do
+   if part:IsA("BasePart") then assert(not part.Anchored,"Ownership assigned before the live assembly was unanchored") end
+  end
+ end
 
  local storage=makeInstance("Folder")
  local shared=makeInstance("Folder"); shared.Name="Shared"; shared.Parent=storage
@@ -209,6 +228,9 @@ return function(configSource, modelSource, characterSource)
   for _,obj in ipairs(character:GetDescendants()) do if obj:IsA(className) then count+=1 end end
   return count
  end
+ local function expectedClearance(character)
+  return math.min(.2,.08*math.max(1,character:GetAttribute("VisualScale")))
+ end
  for _,rig in ipairs({"R6","R15"}) do
   local player,humanoid,root,torso=makePlayer(rig)
   local character=player.Character
@@ -219,10 +241,17 @@ return function(configSource, modelSource, characterSource)
     assert(character.AnimalVisual.Scale==config.Mutation(mutation).Scale)
     local collider=character.AnimalCollider
     assert(collider.CanCollide and collider.CanTouch and collider.CollisionGroup=="Default")
+    assert(collider.Shape=="Ball" and not collider.Anchored,"Landing collider must be rounded and unanchored")
+    assert(collider.CustomPhysicalProperties[2]==.05 and collider.CustomPhysicalProperties[4]==100,"Collider still has floor-snagging friction")
+    assert(collider.CustomPhysicalProperties[3]==0,"Collider can bounce on landing")
     assert(collider.Size.X<=3.8 and collider.Size.Y<=4.1 and collider.Size.Z<=4.4,"Collider is too large for travel")
-    assert(math.abs(collider.CFrame.Position.Y-collider.Size.Y/2-(root.CFrame.Position.Y-3))<1e-8,"Collider floor offset wrong")
+    assert(math.abs(collider.CFrame.Position.Y-collider.Size.Y/2-(root.CFrame.Position.Y-3)-expectedClearance(character))<1e-8,"Collider must clear the controller's floor plane")
+    assert(character:GetAttribute("AnimalFloorClearance")==expectedClearance(character))
     assert(torso.Transparency==1 and not torso.CanCollide and torso.CollisionGroup=="EvolutionAvatar","Default avatar still visible or collidable")
     assert(root.CollisionGroup=="Default" and not root.CanCollide,"Humanoid root cannot sense the map floor")
+    assert(root.RootPriority==127 and root.Massless==false,"Morph lost the authoritative assembly root")
+    assert(humanoid.AutomaticScalingEnabled==false,"Appearance loading can still resize the hidden control rig")
+    assert(root:GetNetworkOwner()==player,"Morph did not retain responsive player ownership")
     local colliders=0
     for _,child in ipairs(character:GetChildren()) do if child.Name=="AnimalCollider" then colliders+=1 end end
     assert(colliders==1,"Morph stacked colliders")
@@ -252,6 +281,20 @@ return function(configSource, modelSource, characterSource)
      end
      assert(enabled>0,"Avatar hiding disabled animal effects")
     end
+    -- Appearance completion must not replace the assembly while W or jump is
+    -- held. These assertions cover lifecycle invariants, not engine physics.
+    local visual=character.AnimalVisual
+    local originalRoot=root.CFrame
+    local originalVelocity=root.AssemblyLinearVelocity
+    local writes=root.NetworkOwnershipWrites
+    torso.CanCollide=true;torso.Transparency=0
+    humanoid.AutomaticScalingEnabled=true
+    assert(characterModule.Apply(player,{Form=form,Mutations={[tostring(form)]=mutation}}))
+    assert(character.AnimalVisual==visual and character.AnimalCollider==collider,"Identical appearance refresh rebuilt the live assembly")
+    assert(root.CFrame==originalRoot and root.AssemblyLinearVelocity==originalVelocity,"Appearance refresh moved or slowed the player")
+    assert(root.NetworkOwnershipWrites==writes,"Appearance refresh changed network ownership")
+    assert(not torso.CanCollide and torso.Transparency==1 and not humanoid.AutomaticScalingEnabled,"Appearance refresh failed to hide or freeze the avatar rig")
+    assert(heartbeat:Count()==1 and character.DescendantAdded:Count()==1,"Appearance refresh registered duplicate callbacks")
    end
    for _,mutation in ipairs({"Normal","Giant","Tiny"}) do
     local data={Form=form,Mutations={[tostring(form)]=mutation}}
@@ -268,13 +311,15 @@ return function(configSource, modelSource, characterSource)
     assert(humanoid.WalkSpeed==config.Species[form].WalkSpeed*config.Mutation(mutation).Speed*1.5,"Speed potion does not multiply the species and mutation speed")
     local groundHeight=character:GetAttribute("AnimalGroundHeight")
     assert(math.abs(root.CFrame.Position.Y-groundHeight-baselineFloor)<1e-8,"Growing buried the feet or launched the morph")
-    assert(math.abs(character.AnimalCollider.CFrame.Position.Y-character.AnimalCollider.Size.Y/2-baselineFloor)<1e-8,"Giant collider does not rest on the same floor")
+    assert(math.abs(character.AnimalCollider.CFrame.Position.Y-character.AnimalCollider.Size.Y/2-baselineFloor-expectedClearance(character))<1e-8,"Giant collider does not clear the same floor")
     local humanoidFloor=root.Size.Y/2+humanoid.HipHeight+(rig=="R6" and character["Left Leg"].Size.Y or 0)
     assert(math.abs(humanoidFloor-groundHeight)<1e-8,"Giant floor sensing no longer matches its collider")
     assert(root.AssemblyLinearVelocity==velocity,"Growing changed motion velocity")
     local giantRoot=root.CFrame.Position.Y
+    local giantVisual,giantCollider=character.AnimalVisual,character.AnimalCollider
     assert(characterModule.Apply(player,data))
     assert(root.CFrame.Position.Y==giantRoot,"Refreshing giant potion cumulatively raised the rig")
+    assert(character.AnimalVisual==giantVisual and character.AnimalCollider==giantCollider,"Refreshing giant potion rebuilt the assembly")
     assert(character:GetAttribute("BuffGiant") and character:GetAttribute("BuffSpeed"))
     data.BuffModifiers={Speed=1,Scale=1,HuntBonus=0}
     assert(characterModule.Apply(player,data))
@@ -288,6 +333,25 @@ return function(configSource, modelSource, characterSource)
   local accessory=makeInstance("Accessory"); accessory.Parent=character
   local handle=makeInstance("Part"); handle.Name="Handle"; handle.Parent=accessory
   assert(handle.Transparency==1 and not handle.CanCollide and handle.CollisionGroup=="EvolutionAvatar","Late accessory showed default avatar")
+  local speedData={Form=1,Mutations={}}
+  assert(characterModule.Apply(player,speedData))
+  local visual,collider=character.AnimalVisual,character.AnimalCollider
+  local ownerWrites=root.NetworkOwnershipWrites
+  local position,velocity=root.CFrame,root.AssemblyLinearVelocity
+  for _,speed in ipairs({1.5,1.5,1}) do
+   speedData.BuffModifiers={Speed=speed,Scale=1}
+   assert(characterModule.Apply(player,speedData))
+   assert(humanoid.WalkSpeed==config.Species[1].WalkSpeed*speed,"Speed-only refresh did not update movement stats")
+   assert(character.AnimalVisual==visual and character.AnimalCollider==collider,"Speed-only refresh rebuilt the assembly")
+   assert(root.NetworkOwnershipWrites==ownerWrites and root.CFrame==position and root.AssemblyLinearVelocity==velocity,"Speed-only refresh disturbed ownership or motion")
+   assert(character:GetAttribute("BuffSpeed")== (speed>1),"Speed-only refresh left stale control attributes")
+  end
+  root:SetNetworkOwner(nil)
+  assert(characterModule.Apply(player,{Form=2,Mutations={}}))
+  assert(root:GetNetworkOwner()==nil,"Morph cancelled temporary server ownership during a PvP push")
+  root:SetNetworkOwner(player)
+  assert(characterModule.Apply(player,{Form=1,Mutations={}}))
+  assert(root:GetNetworkOwner()==player,"Morph lost player ownership after PvP recovery")
   characterModule.Apply(player,{Form=13,Mutations={['13']="Normal"}})
   humanoid.State="Running"; root.AssemblyLinearVelocity=vector(0,0,0); heartbeat:Fire(.11)
   assert(root.GlideForce.Force.Y==0,"Grounded animal is levitating")
@@ -319,7 +383,7 @@ return function(configSource, modelSource, characterSource)
     local groundHeight=character:GetAttribute("AnimalGroundHeight")
     local collider=character.AnimalCollider
     assert(math.abs(root.CFrame.Position.Y-groundHeight-spawnFloor)<1e-8,"Active giant respawn changed the intended floor")
-    assert(math.abs(collider.CFrame.Position.Y-collider.Size.Y/2-spawnFloor)<1e-8,"Active giant respawn spawned its collider underground")
+    assert(math.abs(collider.CFrame.Position.Y-collider.Size.Y/2-spawnFloor-expectedClearance(character))<1e-8,"Active giant respawn failed to clear the floor")
     assert(math.abs(root.Size.Y/2+humanoid.HipHeight+legHeight-groundHeight)<1e-8,"Active giant respawn ignored the R6 leg height")
     assert(root.AssemblyLinearVelocity==velocity,"Active giant respawn added an impulse")
     data.BuffModifiers={Speed=1,Scale=1,HuntBonus=0}
@@ -348,5 +412,5 @@ return function(configSource, modelSource, characterSource)
   assert(base.Color==original,"Normal preview did not restore authored palette")
   preview:Destroy()
  end
- print("Character lifecycle passed: 15 species × 8 mutation changes × R6/R15; speed and 5x giant refresh/expiry, active-potion respawn and R6 leg height, stable floor, one collider, clean effects")
+ print("Character lifecycle passed: 15 species × 8 mutation changes × R6/R15; rounded collider clearance, stable appearance/speed refreshes, ownership, unanchored rigging, 5x giant refresh/expiry, active-potion respawn and clean effects")
 end

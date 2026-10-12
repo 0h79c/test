@@ -28,6 +28,8 @@ Sông có đường nhảy qua các hòn đá miễn phí và cầu có phí **1
 
 Khi chết, người chơi hồi sinh ở vị trí an toàn ngẫu nhiên trong **cùng vùng sinh thái**, cách vị trí chết ít nhất **200 m / 714,29 studs**. Tiến trình loài và tiền được giữ lại.
 
+Trước khi tạo nhân vật hồi sinh, server yêu cầu tải vùng đất tại điểm đến (tối đa 3 giây cho mỗi yêu cầu). Collider của thú được bo tròn, có ma sát thấp và chừa khoảng nhỏ so với mặt sàn của bộ điều khiển. Tải xong ngoại hình hoặc thay đổi buff tốc độ sẽ giữ nguyên model/collider đang dùng; các bộ phận trang trí được bỏ neo trước khi nối vào nhân vật.
+
 15 loài: Ốc Sên, Sâu Bướm, Chuột, Ếch, Rùa, Thỏ, Mèo, Chó Săn, Khỉ, Báo Gấm, Chuột Túi, Tinh Tinh, Ngựa Cánh, Phượng Hoàng, Rồng Trắng. Model có hình dáng và bộ phận riêng, mắt, mõm, bàn chân, hoa văn, mai, đuôi, cánh, sừng. Animation chân/cánh/đuôi chạy trên client, phối hợp thân và nhịp bước theo từng loài. Tần số bước tăng theo **tốc độ di chuyển thực tế**, nên AI chạy chậm có nhịp bước chậm và thuốc tăng tốc làm nhịp bước nhanh hơn. Sách hiển thị preview 3D của từng loài và skin đã đạt.
 
 ## Thức ăn, AI và đột biến
@@ -137,3 +139,5 @@ python3 tools/validate.py
 Hoặc truyền `--luau /path/to/luau --compiler /path/to/luau-compile`. Các kiểm tra bao gồm cấu trúc place/map/model, biên dịch Luau, luật tiến hóa/độ no/bộ gen, startup/lưu dữ liệu, AI/food, buff và thời hạn, HUD trên màn hình nhỏ, thính và commerce trong harness CLI.
 
 **Môi trường CLI không có Roblox engine. Vật lý, render, hiệu năng streaming và mua hàng thực tế cần kiểm tra trong Studio/experience đã publish.** Trước phát hành, thử Play, Start Server với 2 client để tranh ăn/đẩy nhau, nhảy qua sông, đi cầu/dịch chuyển mất tiền, chết/hồi sinh, thính và lưu lại sau khi thoát. Chỉnh Graphics Quality theo thiết bị để đánh giá cảnh quan và tốc độ khung hình.
+
+Kiểm tra di chuyển bằng Ốc Sên và một loài lớn: giữ **W**, nhảy liên tục bằng **Space**, đáp xuống nền và đá rồi tiếp tục đi; thử lại sau **Reset Character** nhiều lần, với R6/R15 và thuốc Khổng Lồ đang hoạt động. Kiểm tra cả lúc tải ngoại hình hoàn tất và buff tốc độ hết hạn. Nhân vật cần tiếp tục di chuyển mà không phải đổi sang A/D/S để gỡ kẹt. Harness tự động kiểm tra khoảng hở collider, model không neo khi ghép, giữ nguyên bộ phận/velocity khi refresh, quyền điều khiển vật lý và thứ tự tải vùng hồi sinh; các kiểm tra đó không mô phỏng vật lý Roblox.

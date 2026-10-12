@@ -142,6 +142,12 @@ return function(serverSource)
    table.insert(self.Impulses,impulse);self.AssemblyLinearVelocity+=impulse/self.AssemblyMass
   end
   function instanceMethods:ChangeState(state) self.LastState=state end
+  function instanceMethods:RequestStreamAroundAsync(position,timeout)
+   self.StreamRequests=self.StreamRequests or {}
+   table.insert(self.StreamRequests,{Position=position,Timeout=timeout,LoadCount=self.LoadCount or 0})
+   if options.streamDelay then scheduler.wait(math.min(options.streamDelay,timeout)) end
+   if options.streamFailure then error("Simulated unavailable streaming") end
+  end
   function instanceMethods:LoadCharacterAsync()
    self.LoadCount=(self.LoadCount or 0)+1
    if self.Character then self.Character.Parent=nil end
@@ -179,6 +185,7 @@ return function(serverSource)
    table.insert(playerList,p);return p
   end
   workspaceMock=instance("Workspace");workspaceMock.Gravity=196.2
+  workspaceMock.StreamingEnabled=options.streaming==true
   function workspaceMock:GetServerTimeNow() return timeBase+now end
   function workspaceMock:Raycast() return if options.blockAttack then {} else nil end
   local world={StartSpawn=cframe(0,16,0),BuildCount=0,RandomCalls={},Teleports={}}
@@ -391,6 +398,46 @@ return function(serverSource)
  assert(unpublished:LatestState(player).ReadOnly,"Temporary mode must report unsaved progress")
  assert(not unpublished.Commerce.Callbacks.CanPurchaseDrop(player),"Paid drops must be unavailable without durable storage")
  assert(not unpublished:Grant(player,"cannot-persist"))
+
+ -- Stream distant respawn ground before loading the replacement character;
+ -- a failed request or disconnect must not strand or recreate the player.
+ local streaming=createHarness({streaming=true,streamDelay=0.4})
+ local streamed=streaming:AddPlayer(101)
+ assert(not streamed.Character,"Character spawned before its requested terrain")
+ streaming.Advance(0.5)
+ assertReady(streaming,streamed,1,1)
+ assert(#streamed.StreamRequests==1 and streamed.StreamRequests[1].Timeout==3)
+ local oldCharacter=streamed.Character
+ local deathPoint=streaming.Vector(2500,16,50)
+ oldCharacter.HumanoidRootPart.Position=deathPoint
+ streaming:Kill(streamed);streaming.Advance(5.1)
+ assert(streamed.Character==oldCharacter,"Respawn created a character while its terrain was pending")
+ local request=streamed.StreamRequests[#streamed.StreamRequests]
+ assert(request.LoadCount==1 and (request.Position-deathPoint).Magnitude>=Config.DeathRespawnStuds,
+  "Death did not prefetch its distant destination before loading the new character")
+ streaming.Advance(0.5)
+ assertReady(streaming,streamed,1,1)
+ assert(streamed.Character~=oldCharacter and streamed.LoadCount==2)
+ assert((streamed.Character.HumanoidRootPart.Position-request.Position).Magnitude<0.001)
+ assert(streamed.Character.HumanoidRootPart.AssemblyLinearVelocity.Magnitude==0,
+  "Respawn retained motion from the previous life")
+
+ local noStream=createHarness({streaming=true,streamFailure=true})
+ local fallbackStream=noStream:AddPlayer(102)
+ assertReady(noStream,fallbackStream,1,1)
+ noStream:Respawn(fallbackStream)
+ assertReady(noStream,fallbackStream,1,1)
+ local departingStream=createHarness({streaming=true,streamDelay=2})
+ local waiting=departingStream:AddPlayer(103)
+ departingStream:RemovePlayer(waiting);departingStream.Advance(4)
+ assert(not waiting.Character,"Streaming completion recreated a departed player")
+ local savedStream=createHarness({streaming=true,streamDelay=0.4,gameId=1,loadDelay=0.2,
+  profile={Form=3,Unlocked=3,Position={X=2600,Y=16,Z=60},Mutations={}}})
+ local restoredStream=savedStream:AddPlayer(104)
+ savedStream.Advance(1)
+ assertReady(savedStream,restoredStream,3,3)
+ assert(#restoredStream.StreamRequests==2 and restoredStream.StreamRequests[2].Position.X==2600,
+  "Profile restoration during streaming did not prefetch the updated spawn")
 
  local acquisitionFailure=createHarness({studio=false,gameId=1,acquireFailure=true})
  local fallback=acquisitionFailure:AddPlayer(2)

@@ -515,7 +515,23 @@ local function addPlayer(player)
  local function spawn()
   if spawning or not player.Parent or not profiles[player] then return end
   spawning=true
-  local ok,err=pcall(function() player:LoadCharacterAsync() end)
+  local ok,err=pcall(function()
+   -- A same-biome respawn can be beyond the client's streamed region. Request
+   -- that ground before creating the new, freely controlled character. Never
+   -- anchor a live character or disable its controls while waiting for terrain.
+   if workspace.StreamingEnabled then
+    local destination=data.NextSpawn or World.StartSpawn
+    pcall(function() player:RequestStreamAroundAsync(destination.Position,3) end)
+    if profiles[player]~=data or not player.Parent then return end
+    -- The initial profile may finish loading during the streaming request.
+    local latest=data.NextSpawn or World.StartSpawn
+    if (latest.Position-destination.Position).Magnitude>1 then
+     pcall(function() player:RequestStreamAroundAsync(latest.Position,3) end)
+    end
+   end
+   if profiles[player]~=data or not player.Parent then return end
+   player:LoadCharacterAsync()
+  end)
   spawning=false
   if not ok then warn("Evolution spawn failed",player.UserId,err) end
  end

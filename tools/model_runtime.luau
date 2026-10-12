@@ -125,23 +125,30 @@ end
 function AnimalModels.Rig(model, root)
  local modelRoot = model.PrimaryPart
  local scale = model:GetScale()
+ local parts = {}
  local joints = {}
  for _, part in ipairs(model:GetDescendants()) do
   if not part:IsA("BasePart") or part == root then continue end
-  local pivot = part:GetAttribute("MotionPivot")
-  local hinge = pivot and modelRoot.CFrame * CFrame.new(pivot * scale) or part.CFrame
-  local joint = Instance.new("Motor6D")
-  joint.Name = "AnimalJoint"
-  joint.Part0 = root
-  joint.Part1 = part
-  joint.C0 = root.CFrame:ToObjectSpace(hinge)
-  joint.C1 = part.CFrame:ToObjectSpace(hinge)
-  joint.Parent = part
+  -- Complete this for the entire visual before connecting any live assembly.
+  -- Joining even one anchored decoration can temporarily anchor the character
+  -- and reset its physics ownership while a morph or respawn is replicating.
   part.Anchored = false
   part.CanCollide = false
   part.CanTouch = false
   part.CanQuery = false
   part.Massless = true
+  table.insert(parts,part)
+ end
+ for _, part in ipairs(parts) do
+  local pivot = part:GetAttribute("MotionPivot")
+  local hinge = pivot and modelRoot.CFrame * CFrame.new(pivot * scale) or part.CFrame
+  local joint = Instance.new("Motor6D")
+  joint.Name = "AnimalJoint"
+  joint.C0 = root.CFrame:ToObjectSpace(hinge)
+  joint.C1 = part.CFrame:ToObjectSpace(hinge)
+  joint.Part0 = root
+  joint.Part1 = part
+  joint.Parent = part
   table.insert(joints,AnimalModels.DescribeJoint(joint))
  end
  return joints

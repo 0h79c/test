@@ -28,6 +28,12 @@ return function(modelSource, clientSource, configSource)
   local p=a.Position+rotate(a.R,b.Position)
   return cf(p.X,p.Y,p.Z,r)
  end
+ fm.__index={ToObjectSpace=function(a,b)
+  local r=a.R
+  local inverse={r[1],r[4],r[7],r[2],r[5],r[8],r[3],r[6],r[9]}
+  local p=rotate(inverse,a.Position*-1)
+  return cf(p.X,p.Y,p.Z,inverse)*b
+ end}
  local function angles(x,y,z)
   local cx,sx,cy,sy,cz,sz=math.cos(x),math.sin(x),math.cos(y),math.sin(y),math.cos(z),math.sin(z)
   return cf(0,0,0,{cy*cz,-cy*sz,sy,sx*sy*cz+cx*sz,-sx*sy*sz+cx*cz,-sx*cy,-cx*sy*cz+sx*sz,cx*sy*sz+sx*cz,cx*cy})
@@ -37,6 +43,63 @@ return function(modelSource, clientSource, configSource)
  local models=module()
  local config=assert(loadstring(configSource))()
  local function close(a,b,label) assert((a-b).Magnitude<1e-7,label) end
+ -- Property assignments are observed immediately, before Rig returns. A
+ -- final-state assertion misses the transient anchored joint that can freeze
+ -- a live character while its new appearance replicates to the physics owner.
+ for _,definition in ipairs(models.Definitions) do
+  for _,anchoredRoot in ipairs({false,true}) do
+   local controlRoot={Anchored=anchoredRoot,CanCollide=true,Massless=false,CFrame=cf(9,17,4)*angles(0,.65,0)}
+   function controlRoot:IsA(kind) return kind=="BasePart" end
+   local function part(frame,attrs)
+    return {Anchored=true,CanCollide=true,CanTouch=true,CanQuery=true,Massless=false,CFrame=frame,
+     IsA=function(_,kind) return kind=="BasePart" end,
+     GetAttribute=function(_,key) return attrs[key] end}
+   end
+   local origin=controlRoot.CFrame*cf(0,-3,0)
+   local visualRoot=part(origin,{})
+   local decorations={visualRoot}
+   for _,description in ipairs(definition.Parts) do
+    local r=description.rotation
+    local transform=origin*cf(v(table.unpack(description.position))*1.5)*angles(math.rad(r[1]),math.rad(r[2]),math.rad(r[3]))
+    table.insert(decorations,part(transform,{
+     Motion=description.motion,Phase=description.phase,
+     MotionPivot=description.pivot and v(table.unpack(description.pivot)),
+    }))
+   end
+   local descendants=table.clone(decorations)
+   table.insert(descendants,controlRoot)
+   table.insert(descendants,{IsA=function() return false end})
+   local activated=0
+   env.Instance={new=function(kind)
+    assert(kind=="Motor6D")
+    local properties={}
+    return setmetatable({}, {__index=properties,__newindex=function(_,key,value)
+     if key=="Part0" or key=="Part1" or key=="Parent" then
+      assert(properties.C0 and properties.C1,"A motor was connected before its authored offsets were ready")
+      for _,visualPart in ipairs(decorations) do
+       assert(not visualPart.Anchored,"An anchored decoration was present while joining the live assembly")
+       assert(not visualPart.CanCollide and not visualPart.CanTouch and not visualPart.CanQuery and visualPart.Massless,
+        "A decoration could affect physics while the live assembly was connected")
+      end
+     end
+     if key=="Parent" then
+      assert(properties.Part0==controlRoot and properties.Part1==value,"Rig joined the wrong assembly")
+      activated+=1
+     end
+     properties[key]=value
+    end})
+   end}
+   local rigged=models.Rig({PrimaryPart=visualRoot,GetScale=function() return 1.5 end,GetDescendants=function() return descendants end},controlRoot)
+   assert(activated==#decorations and #rigged==#decorations,"Rig skipped decorative parts")
+   assert(controlRoot.Anchored==anchoredRoot and controlRoot.CanCollide and not controlRoot.Massless,"Rig altered the player or NPC control root")
+   for _,state in ipairs(rigged) do
+    local joint=state.Joint
+    local a,b=controlRoot.CFrame*joint.C0,joint.Part1.CFrame*joint.C1
+    close(a.Position,b.Position,"Rig changed the authored hinge position")
+    for index,value in ipairs(a.R) do assert(math.abs(value-b.R[index])<1e-7,"Rig changed the authored hinge orientation") end
+   end
+  end
+ end
  for form,definition in ipairs(models.Definitions) do
   local rate=models.GaitRate(form,30,1)
   assert(math.abs(models.GaitRate(form,60,1)-rate*2)<1e-9,"Cadence must rise with actual speed")
@@ -113,5 +176,5 @@ return function(modelSource, clientSource, configSource)
  assert(snapshots[7].Phase-before>models.GaitRate(7,40,1)*2,"Speed boost did not accelerate animation")
  root.Position=v(200,0,0);clock+=1/60;tick(1/60)
  assert(snapshots[3].Speed<.001,"Teleport produced a burst of running animation")
- print("PASS: all 15 gaits, connected articulated knees, uncapped speed cadence, giant strides, anchored NPC motion and smooth transitions")
+ print("PASS: safe live rig attachment, all 15 gaits, connected articulated knees, uncapped speed cadence, giant strides, anchored NPC motion and smooth transitions")
 end
